@@ -37,6 +37,14 @@ API는 Android 앱이 PC 서버에 “선택한 파일을 올려 주세요”, �
 7. **최종 게시 승인:** 정확한 콘텐츠 버전/hash, 렌더 파일 hash, 플랫폼, 계정, 공개범위, 문구를 한 승인에 묶습니다.
 8. **게시 요청:** 서버가 현재 결과·승인·권리·계정 권한·멱등 기록을 재검사합니다. 불명확한 조건은 차단합니다.
 
+### 예투 라우팅·Creator 기획
+
+`GET /capabilities`는 Creator·Schedule·Wellness·Diary 등록 상태와 확장용 Blog·Music 비활성 상태를 알려줍니다. `POST /assistant/messages`는 한국어 규칙 기반으로 한 Agent를 선택합니다. 요청이 여러 Agent에 걸치거나 분류되지 않으면 질문을 되돌리고, 계획 상태인 Agent는 등록됐지만 아직 기능을 실행하지 않는다고 답합니다. 기획을 만들려면 사용자 인증된 Creator `task_id`가 필요합니다.
+
+Creator의 `POST /tasks/{task_id}/plan`은 그 프로젝트에 연결된 선택 미디어만 사용해 구조화된 쇼츠 장면 기획과 자막 초안을 만듭니다. 기획은 콘텐츠 버전/hash와 `plan` 중간 승인 checkpoint에 저장됩니다. `GET /tasks/{task_id}/plan`으로 현재 기획을 읽을 수 있습니다. 자막은 기획 승인 뒤 `GET /tasks/{task_id}/draft`에서 표시되며, 별도 `draft` 승인 전에 렌더할 수 없습니다. 기획을 수정하면 새 콘텐츠 버전이 되고 이전 승인은 모두 무효화됩니다.
+
+외부 LLM은 기본 비활성화이며 현재 서버에는 OpenAI 연결이 없습니다. 기본 생성은 로컬 규칙 fallback이며 테스트만 Fake LLM을 사용합니다. 향후 공급자 호출도 단일 LLM Gateway를 거쳐야 하며, 서버 측 명시 동의 검증이 없는 PrivacyGate는 외부 요청을 0회로 차단합니다. 초기 한도는 설정 가능한 제안값으로 일 `$0.20`, 월 `$5`, 작업당 5회입니다. 예산 예약은 로컬 state에 기록하며 timeout은 중복 과금을 막기 위해 자동 재호출하지 않습니다.
+
 ## 승인 종류는 서로 바꿔 쓸 수 없습니다
 
 | checkpoint 종류 | 허용 scope | 뜻 |

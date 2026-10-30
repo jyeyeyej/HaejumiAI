@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSy
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const EMPTY = { uploads: {}, media: {}, projects: {}, tasks: {}, checkpoints: {}, approvals: {}, publications: {}, jobs: {}, idempotency: {} };
+const EMPTY = { uploads: {}, media: {}, projects: {}, tasks: {}, checkpoints: {}, approvals: {}, publications: {}, jobs: {}, idempotency: {}, llmBudget: {} };
 
 export class JsonState {
   constructor(filePath) {

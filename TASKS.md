@@ -142,6 +142,14 @@ Mock vs 실제 서비스:
 - 자동 테스트: 플랫폼별 레코드 생성·조회, 중복 방지, 타인 접근 차단, 테스트 렌더 최종승인 거부, 수정 후 해당 승인만 무효화, 다른 플랫폼 승인은 유지. `npm test`: 20 passed, 실패 0.
 - 실제 FFmpeg/ffprobe 성공 경로와 실제 영상 기반 승인 전이는 이 PC에 도구가 없어 미검증입니다. 정식 OpenAPI validator도 미설치 상태라 OAS 3.1 형식 검증 미실행입니다. SNS 연동·게시, 외부 LLM/개인정보 전송은 0회입니다.
 
+## 예투 Supervisor·Creator AI 기획 참조 구현 기록
+
+- Capability Registry에 Creator/Schedule/Wellness/Diary를 등록했습니다. Creator만 구현 상태이며 Schedule/Wellness/Diary는 라우팅 등록만 하고 개인 기능을 실행하지 않습니다. Blog/Music은 비활성 확장 항목입니다.
+- 규칙 기반 Supervisor는 요청을 capability로 분류하고 모호한 복수 의도는 사용자 명확화를 요청합니다. Creator 요청은 소유 task의 선택 프로젝트 미디어만 사용합니다.
+- Creator 기획은 구조화 쇼츠 장면표와 자막 초안을 저장하고 `plan` 승인 뒤 초안을 표시합니다. 기획 재수정은 새 버전/hash를 만들고 기존 승인을 무효화합니다. 기존 plan/draft 승인 및 렌더 준비 전이는 유지됩니다.
+- LLM Gateway는 기본 비활성, PrivacyGate는 서버 consent verifier 부재 시 fail closed, OpenAI provider는 미연결입니다. 일/월 예산과 작업별 호출·수정 한도는 설정 가능하고 state에 예산 예약을 저장합니다. timeout은 자동 재시도하지 않습니다. 운영은 local-rules fallback, Fake LLM은 테스트 전용입니다.
+- 테스트: Registry 확장/라우팅, Creator 계획·중간 승인·수정 무효화·멱등성, 타인 task 거부, LLM 비활성/동의 차단/예산 한도. OpenAI 요청·개인정보 외부 전송은 0회.
+
 
 ## v1.1 정렬 관련
 - 최신 정리: `docs/RECONCILIATION-REPORT.md`, 승인 대기 API 계약: `docs/09-API-CONTRACT.md`, 구체 실행: `DEVELOPMENT-PLAN.md`.

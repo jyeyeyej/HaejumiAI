@@ -25,6 +25,9 @@
 |---|---|---|---|
 | POST | `/assistant/messages` | 예투 요청/라우팅 | 인증, 개인정보 게이트 |
 | GET | `/capabilities` | 사용 가능한 모듈 조회 | 목록 조회가 권한 부여를 뜻하지 않음 |
+| POST | `/tasks/{id}/plan` | Creator 쇼츠 기획·자막 초안 생성/수정 | 소유 프로젝트 미디어, Idempotency-Key, 버전 증가/승인 무효화 |
+| GET | `/tasks/{id}/plan` | 현재 기획안·승인 checkpoint 조회 | 인증·소유권 |
+| GET | `/tasks/{id}/draft` | plan 승인 후 자막 초안 읽기 | 현재 버전의 활성 plan 승인 |
 | GET/POST | `/privacy/consents` | 외부 처리 동의 조회/기록 | 제공자·목적·데이터 범위 명시 |
 | DELETE | `/privacy/consents/{consent_id}` | 외부 처리 동의 철회 | 대기 중 호출 전 재검사 |
 | POST | `/privacy/external-processing-requests` | 외부 처리 작업 요청 | 공통 PrivacyGate, 활성 동의·허용 공급자·최소 전송을 dispatch 전 재검증 |

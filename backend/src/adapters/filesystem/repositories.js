@@ -248,6 +248,95 @@ export class LocalRepositories {
     return publicProject(project);
   }
 
+  async createCreatorPlan(ownerId, taskId, input, idempotencyKey, creatorAgent) {
+    const task = this.state.data.tasks[taskId];
+    if (!task || task.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
+    const project = this.state.data.projects[task.project_id];
+    if (!project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
+    if (!input || Object.keys(input).some((key) => !['content_version', 'request_text'].includes(key)) ||
+        !Number.isSafeInteger(input.content_version) || typeof input.request_text !== 'string' || !input.request_text.trim() || input.request_text.length > 4000) {
+      throw apiError(422, 'VALIDATION_ERROR', '현재 콘텐츠 버전과 기획 요청을 확인해 주세요.');
+    }
+    if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
+    const fingerprint = JSON.stringify({ task_id: taskId, content_version: input.content_version, request_text: input.request_text.trim() });
+    const key = `${ownerId}:creator-plan:${idempotencyKey}`;
+    const prior = this.state.data.idempotency[key];
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '멱등 키가 다른 요청에 사용되었습니다.');
+      if (prior.result) return structuredClone(prior.result);
+      throw apiError(409, 'INVALID_STATE_TRANSITION', '같은 기획 요청을 처리 중입니다.');
+    }
+    if (input.content_version !== task.current_version) throw apiError(409, 'VERSION_CONFLICT', '요청한 콘텐츠 버전이 최신 버전과 다릅니다.');
+    if (!['waiting_plan_approval', 'waiting_draft_approval', 'render_ready', 'render_simulated', 'waiting_preview_approval', 'preview_approved'].includes(task.status) || task.active_job_id) {
+      throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 작업 상태에서는 기획을 생성하거나 수정할 수 없습니다.');
+    }
+    const expectedVersion = task.current_version;
+    const media = project.media_ids.map((mediaId) => this.state.data.media[mediaId]);
+    if (!media.length || media.some((item) => !item || item.ownerId !== ownerId || item.status !== 'available')) throw apiError(404, 'RESOURCE_NOT_FOUND', '선택한 프로젝트 미디어를 찾을 수 없습니다.');
+    this.state.data.idempotency[key] = { fingerprint, status: 'generating' };
+    this.state.save();
+    try {
+      const generated = await creatorAgent.createPlan({ taskId, project: structuredClone(project), requestText: input.request_text.trim(),
+        media: media.map((item) => ({ mediaId: item.mediaId, mediaType: item.mediaType })), revision: Boolean(project.creator_plan) });
+      if (task.current_version !== expectedVersion || task.active_job_id) throw apiError(409, 'VERSION_CONFLICT', '기획 생성 중 콘텐츠 버전이 변경되었습니다.');
+      for (const approval of Object.values(this.state.data.approvals)) if (approval.task_id === taskId && approval.status === 'active') approval.status = 'invalidated';
+      for (const checkpoint of Object.values(this.state.data.checkpoints)) if (checkpoint.task_id === taskId && ['pending', 'approved'].includes(checkpoint.status)) checkpoint.status = 'invalidated';
+      project.plan_request = input.request_text.trim();
+      project.creator_plan = generated.plan;
+      project.caption_draft = generated.captions;
+      project.creator_generation = generated.generation;
+      project.current_version = expectedVersion + 1;
+      project.content_hash = this.contentHash(project);
+      project.status = 'review_required';
+      task.current_version = project.current_version;
+      task.content_hash = project.content_hash;
+      task.status = 'waiting_plan_approval';
+      task.progress_percent = 0; task.next_action = 'review_plan'; delete task.artifact_sha256; delete task.active_job_id;
+      task.updated_at = new Date().toISOString();
+      const checkpointId = randomUUID();
+      const checkpoint = { checkpoint_id: checkpointId, task_id: taskId, owner_id: ownerId, kind: 'plan', status: 'pending',
+        content_version: task.current_version, content_hash: task.content_hash, approval_scope: 'continue',
+        summary: `${project.target_seconds}초 쇼츠 기획을 검토해 주세요. 승인 후 자막 초안 확인 단계로 이동합니다.` };
+      this.state.data.checkpoints[checkpointId] = checkpoint;
+      const result = { task_id: taskId, content_version: task.current_version, content_hash: task.content_hash,
+        plan: structuredClone(project.creator_plan), checkpoint: publicCheckpoint(checkpoint), generation: generated.generation };
+      this.state.data.idempotency[key] = { fingerprint, result };
+      this.state.save();
+      return structuredClone(result);
+    } catch (error) {
+      delete this.state.data.idempotency[key];
+      this.state.save();
+      throw error;
+    }
+  }
+
+  getOwnedCaptionDraft(ownerId, taskId) {
+    const task = this.state.data.tasks[taskId];
+    const project = task && this.state.data.projects[task.project_id];
+    if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) return null;
+    const checkpoint = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'draft' && ['pending', 'approved'].includes(item.status) && item.content_version === task.current_version && item.content_hash === task.content_hash);
+    const planCheckpoint = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'plan' && item.status === 'approved' && item.content_version === task.current_version && item.content_hash === task.content_hash);
+    const planApproval = planCheckpoint && this.state.data.approvals[planCheckpoint.approval_id];
+    if (!checkpoint || !['waiting_draft_approval', 'render_ready', 'rendering', 'render_simulated', 'waiting_preview_approval', 'preview_approved'].includes(task.status) ||
+        !planApproval || planApproval.status !== 'active' || planApproval.approval_scope !== 'continue') {
+      throw apiError(409, 'INVALID_STATE_TRANSITION', '기획 승인 후에만 현재 자막 초안을 열 수 있습니다.');
+    }
+    return { task_id: taskId, content_version: task.current_version, content_hash: task.content_hash,
+      captions: structuredClone(project.caption_draft ?? []), checkpoint: publicCheckpoint(checkpoint) };
+  }
+
+  getOwnedCreatorPlan(ownerId, taskId) {
+    const task = this.state.data.tasks[taskId];
+    const project = task && this.state.data.projects[task.project_id];
+    if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) return null;
+    if (!project.creator_plan) throw apiError(409, 'INVALID_STATE_TRANSITION', '아직 생성된 쇼츠 기획안이 없습니다.');
+    const checkpoint = Object.values(this.state.data.checkpoints).filter((item) => item.task_id === taskId && item.kind === 'plan' &&
+      item.content_version === task.current_version && item.content_hash === task.content_hash).at(-1);
+    if (!checkpoint) throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 버전의 기획 확인 단계를 찾을 수 없습니다.');
+    return { task_id: taskId, content_version: task.current_version, content_hash: task.content_hash, plan: structuredClone(project.creator_plan),
+      checkpoint: publicCheckpoint(checkpoint), generation: structuredClone(project.creator_generation ?? { source: 'local_rules', fallback_used: true, llm_calls: 0, estimated_cost_usd: 0 }) };
+  }
+
   getOwnedProject(ownerId, projectId) {
     const project = this.state.data.projects[projectId];
     return project?.ownerId === ownerId ? publicProject(project) : null;
@@ -260,6 +349,43 @@ export class LocalRepositories {
     return safeTask;
   }
 
+  getOwnedCreatorContext(ownerId, taskId, attachmentIds = []) {
+    const task = this.state.data.tasks[taskId];
+    const project = task && this.state.data.projects[task.project_id];
+    if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) return null;
+    if (!Array.isArray(attachmentIds) || attachmentIds.some((id) => !project.media_ids.includes(id)) ||
+        (attachmentIds.length > 0 && (attachmentIds.length !== project.media_ids.length || attachmentIds.some((id) => !project.media_ids.includes(id))))) {
+      throw apiError(404, 'RESOURCE_NOT_FOUND', '작업에 연결되지 않은 선택 미디어입니다.');
+    }
+    const media = project.media_ids.map((id) => this.state.data.media[id]);
+    if (media.some((item) => !item || item.ownerId !== ownerId || item.status !== 'available')) throw apiError(404, 'RESOURCE_NOT_FOUND', '선택한 미디어를 찾을 수 없습니다.');
+    return { task: { task_id: taskId, current_version: task.current_version, content_hash: task.content_hash, status: task.status },
+      project: structuredClone(project), media: media.map((item) => ({ mediaId: item.mediaId, mediaType: item.mediaType })) };
+  }
+
+  async withIdempotentResponse(ownerId, operation, key, fingerprint, action) {
+    if (!isValidIdempotencyKey(key)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
+    const requestKey = `${ownerId}:${operation}:${key}`;
+    const prior = this.state.data.idempotency[requestKey];
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '멱등 키가 다른 요청에 사용되었습니다.');
+      if (prior.result) return structuredClone(prior.result);
+      throw apiError(409, 'INVALID_STATE_TRANSITION', '같은 요청을 처리 중입니다.');
+    }
+    this.state.data.idempotency[requestKey] = { fingerprint, status: 'processing' };
+    this.state.save();
+    try {
+      const result = await action();
+      this.state.data.idempotency[requestKey] = { fingerprint, result: structuredClone(result) };
+      this.state.save();
+      return result;
+    } catch (error) {
+      delete this.state.data.idempotency[requestKey];
+      this.state.save();
+      throw error;
+    }
+  }
+
   contentHash(project) {
     const media = project.media_ids.map((id) => {
       const item = this.state.data.media[id];
@@ -268,7 +394,8 @@ export class LocalRepositories {
     });
     return sha256(Buffer.from(JSON.stringify({ media, target_seconds: project.target_seconds, aspect_ratio: project.aspect_ratio,
       style: project.style ?? null, framing: project.framing, focal_x: project.focal_x, focal_y: project.focal_y,
-      caption_mode: 'none', audio_mode: 'silent', profile: 'vertical_9_16_h264_aac' })));
+      plan_request: project.plan_request ?? null, creator_plan: project.creator_plan ?? null, caption_draft: project.caption_draft ?? null,
+      caption_mode: 'draft_only', audio_mode: 'silent', profile: 'vertical_9_16_h264_aac' })));
   }
 
   getOwnedCheckpoints(ownerId, taskId) {
@@ -290,7 +417,8 @@ export class LocalRepositories {
         checkpoint.content_version !== input.content_version || checkpoint.content_hash !== input.content_hash) {
       throw apiError(409, 'VERSION_CONFLICT', '체크포인트가 현재 콘텐츠 버전과 일치하지 않습니다.');
     }
-    const priorPlan = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'plan');
+    const priorPlan = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'plan' &&
+      item.content_version === task.current_version && item.content_hash === task.content_hash);
     if (checkpoint.kind === 'draft' && (priorPlan?.status !== 'approved' || task.status !== 'waiting_draft_approval')) {
       throw apiError(409, 'INVALID_STATE_TRANSITION', '기획 체크포인트 승인 후에만 초안 체크포인트를 승인할 수 있습니다.');
     }
@@ -316,7 +444,7 @@ export class LocalRepositories {
       const draftCheckpointId = randomUUID();
       this.state.data.checkpoints[draftCheckpointId] = { checkpoint_id: draftCheckpointId, task_id: taskId, owner_id: ownerId, kind: 'draft', status: 'pending',
         content_version: task.current_version, content_hash: task.content_hash, approval_scope: 'continue',
-        summary: '현재 구현은 자막 없이 무음 AAC 트랙을 사용합니다. 이 구성으로 비공개 미리보기를 렌더할지 확인해 주세요.' };
+        summary: '생성된 자막 초안을 확인하고 수정하거나 다음 렌더 단계 진행을 승인해 주세요. 오디오 구성은 무음입니다.' };
     } else if (checkpoint.kind === 'draft') {
       task.status = 'render_ready'; task.next_action = 'none';
     } else {
@@ -649,6 +777,11 @@ function publicationHash(value) {
 
 function publicPublication(item) {
   const { owner_id: _owner, ...safe } = item;
+  return structuredClone(safe);
+}
+
+function publicCheckpoint(checkpoint) {
+  const { owner_id: _owner, ...safe } = checkpoint;
   return structuredClone(safe);
 }
 

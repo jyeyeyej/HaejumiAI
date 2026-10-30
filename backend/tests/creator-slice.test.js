@@ -14,6 +14,11 @@ import { PrivacyGate } from '../src/security/privacy-gate.js';
 import { corruptPngCrc, makeJpegStructure, makeMp4Structure, makePng, makeWebpStructure } from './media-fixtures.js';
 import { createRenderCoordinator } from '../src/application/render-coordinator.js';
 import { createTestRenderer } from '../src/media-engine/test-renderer.js';
+import { createDefaultCapabilityRegistry } from '../src/agents/capability-registry.js';
+import { SupervisorRouter } from '../src/agents/supervisor-router.js';
+import { CreatorAgent } from '../src/agents/creator-agent.js';
+import { LLMGateway } from '../src/application/llm-gateway.js';
+import { createMockLLMProvider } from './mock-llm.js';
 
 const tokenA = 'test-owner-a-token-with-enough-random-looking-bytes';
 const tokenB = 'test-owner-b-token-with-enough-random-looking-bytes';
@@ -32,14 +37,18 @@ async function fixture(t, rendererFactory = null) {
   } };
   const renderer = rendererFactory ? rendererFactory(repositories) : createTestRenderer({ outputRoot: repositories.renderDir });
   const renderCoordinator = createRenderCoordinator({ repositories, renderer });
-  const server = createServer(createApiHandler({ repositories, auth, maxMediaBytes: 1024 * 1024, renderCoordinator }));
+  const registry = createDefaultCapabilityRegistry();
+  const router = new SupervisorRouter(registry);
+  const mockLLM = createMockLLMProvider();
+  const creatorAgent = new CreatorAgent({ gateway: new LLMGateway({ enabled: true, allowMockProvider: true, provider: mockLLM, privacyGate: new PrivacyGate(), limits: { dailyUsd: 1, monthlyUsd: 5, maxCallsPerTask: 5, maxRevisionsPerTask: 3 } }) });
+  const server = createServer(createApiHandler({ repositories, auth, maxMediaBytes: 1024 * 1024, renderCoordinator, capabilityRegistry: registry, supervisorRouter: router, creatorAgent }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}/api/v1`;
   t.after(async () => {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     rmSync(dataDir, { recursive: true, force: true });
   });
-  return { base, repositories, renderCoordinator };
+  return { base, repositories, renderCoordinator, registry, router, mockLLM };
 }
 
 function headers(token = tokenA) { return { authorization: `Bearer ${token}` }; }
@@ -49,6 +58,86 @@ test('auth is required before private API routes', async (t) => {
   const response = await fetch(`${base}/content/projects`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ media_ids: [] }) });
   assert.equal(response.status, 401);
   assert.equal((await response.json()).error.code, 'AUTHENTICATION_REQUIRED');
+});
+
+test('Supervisor routes registered Agents and Creator plan/draft approvals advance with version invalidation', async (t) => {
+  const { base, repositories, mockLLM } = await fixture(t);
+  const capabilities = await fetch(`${base}/capabilities`, { headers: headers() }).then((r) => r.json());
+  assert.deepEqual(capabilities.items.map((item) => item.module_id), ['creator', 'schedule', 'wellness', 'diary', 'blog', 'music']);
+  assert.equal(capabilities.items.find((item) => item.module_id === 'creator').status, 'enabled');
+  assert.equal(capabilities.items.find((item) => item.module_id === 'schedule').status, 'planned');
+  assert.equal(capabilities.items.find((item) => item.module_id === 'blog').status, 'disabled');
+
+  const { project, mediaId } = await prepareUnapprovedProject(base, 2121);
+  const unselected = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-unselected-media-key' }, body: JSON.stringify({
+    text: '선택한 사진으로 쇼츠 기획', task_id: project.task_id, attachment_ids: ['99999999-9999-4999-8999-999999999999'],
+  }) });
+  assert.equal(unselected.status, 404);
+  assert.equal(mockLLM.calls, 0);
+  const unconfirmedTranscript = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-transcript-check-01' }, body: JSON.stringify({
+    text: '영상 쇼츠 기획', input_kind: 'confirmed_transcript', confirmed_transcript: false,
+  }) });
+  assert.equal(unconfirmedTranscript.status, 409);
+  const planResponse = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-creator-plan-key-1' }, body: JSON.stringify({
+    text: '선택한 사진으로 여행 쇼츠 기획과 자막을 만들어줘', task_id: project.task_id, attachment_ids: [mediaId],
+  }) });
+  assert.equal(planResponse.status, 202);
+  const routed = await planResponse.json();
+  assert.equal(routed.route, 'creator');
+  assert.equal(routed.capability_id, 'creator.shorts_plan');
+  assert.equal(routed.status, 'routed');
+  assert.equal(routed.plan.scenes[0].caption_text, 'Mock 자막 1');
+  assert.equal(routed.checkpoint.kind, 'plan');
+  assert.equal(routed.content_version, 2);
+  assert.equal(routed.generation.source, 'mock');
+  assert.equal(routed.generation.fallback_used, false);
+  const planRead = await fetch(`${base}/tasks/${project.task_id}/plan`, { headers: headers() });
+  assert.equal(planRead.status, 200);
+  assert.equal((await planRead.json()).content_hash, routed.content_hash);
+  const idempotentReplay = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-creator-plan-key-1' }, body: JSON.stringify({
+    text: '선택한 사진으로 여행 쇼츠 기획과 자막을 만들어줘', task_id: project.task_id, attachment_ids: [mediaId],
+  }) });
+  assert.equal((await idempotentReplay.json()).checkpoint.checkpoint_id, routed.checkpoint.checkpoint_id);
+  assert.equal(mockLLM.calls, 1);
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() })).status, 409);
+
+  const approve = async (checkpoint, key) => fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify({
+    checkpoint_id: checkpoint.checkpoint_id, content_version: checkpoint.content_version, content_hash: checkpoint.content_hash, approval_scope: 'continue',
+  }) });
+  const planApproval = await approve(routed.checkpoint, 'supervisor-plan-approval-01');
+  assert.equal(planApproval.status, 201);
+  const draft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() });
+  assert.equal(draft.status, 200);
+  const draftValue = await draft.json();
+  assert.equal(draftValue.captions[0].text, 'Mock 자막 1');
+  const draftApproval = await approve(draftValue.checkpoint, 'supervisor-draft-approval-01');
+  assert.equal(draftApproval.status, 201, JSON.stringify(await draftApproval.json()));
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}`, { headers: headers() }).then((r) => r.json())).status, 'render_ready');
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() })).status, 200);
+
+  const revision = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'creator-plan-revision-key-1' }, body: JSON.stringify({
+    content_version: 2, request_text: '장면 전개를 더 차분하게 수정해 주세요',
+  }) });
+  assert.equal(revision.status, 201);
+  const revised = await revision.json();
+  assert.equal(revised.content_version, 3);
+  assert.equal(revised.checkpoint.status, 'pending');
+  assert.ok(Object.values(repositories.state.data.approvals).filter((item) => item.task_id === project.task_id).every((item) => item.status === 'invalidated'));
+  assert.equal(mockLLM.calls, 2);
+  const revisionReplay = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'creator-plan-revision-key-1' }, body: JSON.stringify({
+    content_version: 2, request_text: '장면 전개를 더 차분하게 수정해 주세요',
+  }) });
+  assert.equal((await revisionReplay.json()).content_hash, revised.content_hash);
+  assert.equal(mockLLM.calls, 2);
+
+  const foreignPlan = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(tokenB), 'content-type': 'application/json', 'idempotency-key': 'foreign-creator-plan-key' }, body: JSON.stringify({ content_version: 3, request_text: '내 쇼츠' }) });
+  assert.equal(foreignPlan.status, 404);
+  const foreignRoute = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(tokenB), 'content-type': 'application/json', 'idempotency-key': 'foreign-assistant-route-key' }, body: JSON.stringify({ text: '쇼츠 기획', task_id: project.task_id }) });
+  assert.equal(foreignRoute.status, 404);
+  const nonCreator = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-schedule-route-key' }, body: JSON.stringify({ text: '다음 주 일정 알려줘' }) });
+  assert.equal((await nonCreator.json()).agent_id, 'schedule');
+  const ambiguous = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-ambiguous-route-key' }, body: JSON.stringify({ text: '오늘 일정 정리해서 일기 써줘' }) });
+  assert.equal((await ambiguous.json()).status, 'needs_clarification');
 });
 
 test('selected upload, completion, project creation and task status form the first Creator slice', async (t) => {
@@ -184,6 +273,20 @@ async function prepareApprovedProject(base, suffix) {
     assert.equal(response.status, 201);
   }
   return project;
+}
+
+async function prepareUnapprovedProject(base, suffix) {
+  const clientItemId = `44444444-4444-4444-8444-${String(suffix).padStart(12, '0')}`;
+  const init = await fetch(`${base}/media/uploads`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': `upload-init-plan-${suffix}` }, body: JSON.stringify({ items: [{
+    client_item_id: clientItemId, file_name: `selected-plan-${suffix}.png`, declared_media_type: 'image/png', size_bytes: png.length, sha256: digest(png),
+  }] }) });
+  const upload = await init.json();
+  await fetch(`${base}/media/uploads/${upload.upload_id}/parts/1`, { method: 'PUT', headers: { ...headers(), 'content-type': 'application/octet-stream', 'idempotency-key': `upload-part-plan-${suffix}` }, body: png });
+  const manifest = digest(Buffer.from(JSON.stringify([{ client_item_id: clientItemId, sha256: digest(png), size_bytes: png.length }])));
+  const completed = await fetch(`${base}/media/uploads/${upload.upload_id}/complete`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': `upload-done-plan-${suffix}` }, body: JSON.stringify({ manifest_sha256: manifest }) });
+  const mediaId = (await completed.json()).media[0].media_id;
+  const created = await fetch(`${base}/content/projects`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': `project-plan-${suffix}` }, body: JSON.stringify({ media_ids: [mediaId] }) });
+  return { project: await created.json(), mediaId };
 }
 
 test('platform publication metadata is owner-scoped, independent, idempotent and edits invalidate only its approval', async (t) => {

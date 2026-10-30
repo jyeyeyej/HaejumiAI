@@ -20,6 +20,18 @@
 | PUBMETA-07 | 테스트 렌더 artifact로 플랫폼 최종 승인 | `409 RENDER_REQUIRED`; publish_ready 전환 없음 |
 | PUBMETA-08 | 실제 ffmpeg+ffprobe+현재 preview 승인 없는 final approval | `409 RENDER_REQUIRED`; 승인과 외부 호출 모두 0 |
 | PUBMETA-09 | 중간 승인/다른 플랫폼 승인 ID를 플랫폼 final approval에 재사용 | 거부; 플랫폼/콘텐츠/계정/공개범위/문구 간 권한 전이 없음 |
+| SUP-01 | `GET /capabilities` | Creator/Schedule/Wellness/Diary 등록, Blog/Music disabled 상태 반환 |
+| SUP-02 | 단일 Creator/Schedule/Wellness/Diary 표현으로 assistant 요청 | 규칙 기반 단일 Agent route; 호출하지 않은 Agent 데이터 접근 0 |
+| SUP-03 | 여러 Agent에 걸친 모호한 요청 | `needs_clarification`; Agent 실행·LLM 호출 0 |
+| SUP-04 | 비소유 task 또는 연결되지 않은 media ID로 Creator plan 요청 | `404 RESOURCE_NOT_FOUND`; 계획/LLM 호출 0 |
+| SUP-05 | plan checkpoint 승인 전 caption draft 읽기 | `409 INVALID_STATE_TRANSITION`; 초안 비공개 |
+| SUP-06 | plan 승인 후 초안 읽기, draft 승인 전 렌더 | 초안 제공; 렌더 승인 조건은 계속 유지 |
+| SUP-07 | 기획 재수정 후 이전 plan/draft approval 사용 | content_version 증가, 과거 승인 invalidated, 구버전 승인 거부 |
+| LLM-01 | Gateway 기본 설정 또는 LLM enabled=false | 공급자 호출 0; local rules fallback |
+| LLM-02 | PrivacyGate에 검증된 명시 동의/allowlist 없음 | 외부 호출 0; `CONSENT_REQUIRED` fallback |
+| LLM-03 | Mock provider 테스트 | LLM Gateway만 호출; 실제 OpenAI/외부 요청 0 |
+| LLM-04 | 일·월 비용 한도 또는 작업 호출 제한 도달 | 추가 provider 호출 0; `LLM_BUDGET_EXCEEDED` fallback |
+| LLM-05 | 외부 처리 timeout/결과 불명 | 자동 재요청 없음; local fallback, 예약된 한도 유지 |
 | AUTH-03 | request body에 위조 `user_id` 포함 | 소유권은 인증 주체로만 계산; 위조 ID 무시 또는 `422 VALIDATION_ERROR` |
 | AUTH-04 | Creator가 Diary/Wellness scope를 요청 | `403 FORBIDDEN`; 민감 데이터 조회 0회 |
 | AUTH-05 | Diary가 요청 날짜 외 source 또는 허용되지 않은 source ID 참조 | `404 RESOURCE_NOT_FOUND`; 원문 접근 0회 |

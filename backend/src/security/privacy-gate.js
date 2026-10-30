@@ -3,8 +3,21 @@
  * implementation is wired into this initial slice.
  */
 export class PrivacyGate {
-  async authorizeExternalProcessing(_context) {
-    return { allowed: false, code: 'CONSENT_REQUIRED' };
+  constructor({ enabled = false, providerAllowlist = [], consentVerifier = async () => false } = {}) {
+    this.enabled = enabled === true;
+    this.providerAllowlist = new Set(providerAllowlist);
+    this.consentVerifier = consentVerifier;
+  }
+
+  async authorizeExternalProcessing(context) {
+    if (!this.enabled || !this.providerAllowlist.has(context?.providerId)) return { allowed: false, code: 'CONSENT_REQUIRED' };
+    try {
+      const verified = await this.consentVerifier(context);
+      if (verified !== true) return { allowed: false, code: 'CONSENT_REQUIRED' };
+      return { allowed: true };
+    } catch {
+      return { allowed: false, code: 'PRIVACY_POLICY_DENIED' };
+    }
   }
 
   async dispatchExternal(_context, _dispatch) {
@@ -15,8 +28,7 @@ export class PrivacyGate {
       error.code = decision.code;
       throw error;
     }
-    // Intentionally unreachable in this scaffold: an external dispatcher must
-    // only be injected after the consent policy and provider allowlist are approved.
-    throw new Error('No external processor is configured');
+    if (typeof _dispatch !== 'function') throw new Error('No external processor is configured');
+    return _dispatch();
   }
 }

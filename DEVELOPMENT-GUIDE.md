@@ -73,6 +73,13 @@ Android (선택 사진·영상/확인된 텍스트·STT)
 ### 5.2 서버 강제 통제
 - `PrivacyGate`: **수신 에이전트/목적/데이터 필드/제공자/전송 경로/사용자 동의·철회 여부** 검사; 기본 deny. 마스킹·필드 축소 후 전송 페이로드 생성, 필요 시 사용자 재확인. 민감성 판단 자동화만으로 무단 전송 허가 금지.
 - `LLMGateway`: 승인된 제공자 목록과 모델/예산 정책, 프롬프트·응답 로그 비저장, 재시도 제한, 전송 전 차단. 로컬 모델과 외부 모델의 데이터 경계를 명시.
+
+### 예투 Supervisor / Creator 기획 참조 구현
+- `backend/src/agents/capability-registry.js`: Creator 구현, Schedule/Wellness/Diary는 라우팅 등록, Blog/Music은 비활성 extension placeholder입니다.
+- `backend/src/agents/supervisor-router.js`: 외부 LLM 없이 규칙으로 Agent 하나를 선택하고 복수 의도/미분류는 clarification으로 반환합니다.
+- `backend/src/agents/creator-agent.js`: 소유 프로젝트의 선택 media ID/type와 사용자 요청에서 구조화 계획·자막 초안을 생성합니다. 현재 외부 모델 미연결이라 서버는 local-rules fallback을 사용하고 Fake LLM은 테스트에만 주입합니다.
+- `LLMGateway`는 기본 비활성이고 `PrivacyGate`는 서버 consent verifier가 없으면 항상 deny합니다. 현재 OpenAI provider 및 동의 저장 API가 없어 외부 egress는 불가능합니다.
+- 환경 예시: `HAEJUMI_LLM_ENABLED=false`, 일/월 예산, 작업별 호출 수·수정 수. 기본 한도는 실험 제안이며 비용 보증이 아닙니다. 예산 예약은 로컬 state에 저장하고 timeout은 자동 재시도하지 않습니다.
 - `ToolGateway`: LLM에 무제한 HTTP/브라우징/파일시스템/게시 도구 제공 금지; 서버 허용 목록·스키마·권한·승인을 만족할 때만 실행. 인젝션이 포함된 미디어 메타데이터·자막·웹문서는 명령으로 실행 금지.
 - 개인 기록 접근: Creator는 Wellness·Diary 원문 기본 접근 금지; Diary는 해당 날짜의 사용자 허용 데이터만 조회; 전체 기억/전체 대화의 자동 프롬프트 첨부 금지.
 - 실수 방지: 개인정보/토큰 로그 마스킹, 외부 오류 응답에는 내부 경로·원문 금지, `.gitignore`·pre-commit 비밀 탐지, 가짜 테스트 데이터, 소스·의존성 취약점 점검.

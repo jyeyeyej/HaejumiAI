@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 const SETTINGS = new Set([
   'HAEJUMI_BIND_HOST', 'HAEJUMI_PORT', 'HAEJUMI_OWNER_ID',
   'HAEJUMI_BEARER_TOKEN', 'HAEJUMI_DATA_DIR', 'HAEJUMI_MAX_MEDIA_BYTES',
+  'HAEJUMI_LLM_ENABLED', 'HAEJUMI_LLM_DAILY_BUDGET_USD', 'HAEJUMI_LLM_MONTHLY_BUDGET_USD',
+  'HAEJUMI_LLM_MAX_CALLS_PER_TASK', 'HAEJUMI_LLM_MAX_REVISIONS_PER_TASK',
 ]);
 
 /** Load only supported Haejumi keys. Existing process environment wins. */

@@ -25,6 +25,7 @@
 | P1B 업로드 | 선택 파일만 받아 검증·해시·원본 저장, manifest 완료 | 위변조·부분·중복 검증, 원본 불변 | P1A |
 | P1C 로컬 렌더 | 선택 업로드 → plan/draft 승인 → 소유 미디어만 render job → 상태/취소 → 인증 미리보기 | 9:16 MP4 재현·ffprobe 검증·실패/중복 처리; 테스트 렌더는 simulated 표기 | P1B |
 | P1D 게시 정보·독립 승인 | 공통 렌더 task에 플랫폼별 문구/계정/공개범위 저장, 수정·조회, 각 플랫폼의 독립 final approval | 현재 revision/hash와 영상 버전/파일 해시를 결합; 실제 FFmpeg+ffprobe와 미리보기 승인 전 publish_ready 금지; SNS 호출 없음 | P1C |
+| P1E 예투 Supervisor·Creator 기획 | Capability Registry, 규칙 라우터, Creator 구조화 기획/자막 초안, 순차 중간 승인 | 인증·소유 task의 선택 미디어만, 버전 수정/승인 무효화, 기본 외부 LLM 차단, 테스트 Mock | P1C |
 | P2 Creator | 컷 순서/스타일, 자막, 권리 검증된 무료 로컬 음악 | 미검증 음원 게시 차단, 렌더 개선 | P1C |
 | P3 승인·복구 | 계획/자막·음악/미리보기 체크포인트, 최신 버전 해시, 보류·재개 | 수정 후 이전 승인 409, 무승인 저장·게시 0건 | P2 |
 | P4 Android | [제안] Kotlin/Compose 앱 후보, Photo Picker, 선택 업로드 진행률·제안·STT 교정 | 실기기에서 업로드→제안→미리보기·수정·승인 | P1~P3 |
