@@ -1,0 +1,1311 @@
+openapi: 3.1.0
+info:
+  title: Haejumi AI API
+  version: 0.5.0-draft
+  description: >-
+    제안/승인 대기 중인 계약 초안입니다. Creator 우선이며 개인정보 외부 전송과
+    SNS/외부 발행은 서버측 동의·권리·버전 승인 검증 없이는 실행할 수 없습니다.
+  x-contract-status: proposal-pending-user-approval
+servers:
+  - url: /api/v1
+    description: Base path proposal; deployment origin and TLS remain undecided.
+tags:
+  - name: Auth
+  - name: Privacy
+  - name: Capabilities
+  - name: Assistant
+  - name: Media
+  - name: Projects
+  - name: Tasks
+  - name: Approvals
+  - name: Rendering
+  - name: Rights
+  - name: Publishing
+  - name: Diary
+security:
+  - bearerAuth: []
+x-security-policy:
+  status: proposal-pending-user-approval
+  authentication: Every operation requires the authenticated session except POST /auth/session.
+  ownership: >-
+    Derive owner only from the authenticated principal. Check ownership of every
+    referenced resource and its parent. Never accept a caller-supplied owner ID as
+    authorization. Return RESOURCE_NOT_FOUND for absent or non-owned resources.
+  authorization: >-
+    Apply common authentication and ownership checks, then module capability scopes,
+    then operation-specific consent, rights, state-transition and approval checks.
+  agent_scopes:
+    creator: selected media and owned content projects only; no default diary/wellness access.
+    schedule: user-authorized calendar records and minimum calendar scopes only.
+    wellness: user-authorized wellness records only; no cross-agent access by default.
+    diary: only explicitly allowed source IDs for the requested date and purpose.
+    extensions: no personal-data scopes unless separately declared and user-authorized.
+x-privacy-gate:
+  status: mandatory-proposal-pending-user-approval
+  invariant: >-
+    Every outbound request to an LLM, STT, vision, analytics or other external data
+    processor MUST pass the same backend PrivacyGate/LLMGateway. Consent must be
+    active and match provider, purpose, data categories, resource ownership and current
+    policy at dispatch time. Missing, revoked, expired, mismatched or unverifiable
+    consent MUST fail closed before network I/O; outbound request count is zero.
+  no-bypass: User prompts, task creation, intermediate approvals, publish approvals and voice transcripts never grant external-processing consent.
+x-external-egress-policy:
+  status: proposal-pending-user-approval
+  invariant: All outbound network calls are dispatched through a backend-controlled egress broker; agents and LLMs have no direct network access.
+  processor-calls: Require PrivacyGate consent as defined in x-privacy-gate; absent/revoked/invalid consent means zero outbound requests.
+  publication-calls: Require the distinct Publish Gate: exact active final_publish approval, current version/hash, account/visibility/caption binding and RightsDecision=ALLOW. Missing checks mean zero platform requests.
+  separation: A publish approval never authorizes processor calls; a processor consent never authorizes SNS publication.
+x-content-version-policy:
+  status: proposal-pending-user-approval
+  content-hash: >-
+    content_hash is SHA-256 of the canonical immutable version manifest: ordered source
+    media IDs and source SHA-256 values, edit timeline, captions, selected music/license
+    references and render settings. Exact canonical JSON rules remain approval-pending.
+  artifact-hash: artifact_sha256 is SHA-256 of the exact rendered MP4 bytes.
+  versioning: Any content-affecting edit creates content_version + 1 and a new content_hash.
+  invalidation: >-
+    A new content version invalidates all approvals bound to older versions. A change to
+    publish target fields invalidates final_publish approval and requires rights recheck
+    and a new final_publish approval. Old approvals are never revived by reverting edits.
+x-publish-delivery-policy:
+  status: proposal-pending-user-approval
+  idempotency: >-
+    Persist an idempotency record with owner, operation, request fingerprint and publish_id
+    before dispatch. Reusing the same key and fingerprint returns the same publish_id;
+    reusing the key with a different fingerprint returns 409 IDEMPOTENCY_CONFLICT.
+  outbox: Persist a durable outbox item atomically with the publish job before the platform call.
+  uncertain-outcome: >-
+    If a request may have reached the platform but its result is unknown, set
+    outcome_unknown. Do not automatically upload again. Query the official platform API
+    using any available platform operation/upload ID and reconcile to succeeded, failed,
+    or needs_user_action. If the platform cannot reliably query the outcome, retain the
+    unknown state and request user action; never claim success or retry blindly.
+  key-scope-and-retention: approval-bound semantic uniqueness and retention duration remain approval-pending.
+x-capability-registry:
+  status: proposal-pending-user-approval
+  contract: >-
+    module_id and capability_id are open string identifiers, not closed enums. Clients
+    discover enabled capabilities and input_schema_version from GET /capabilities.
+    The server rejects unknown or disabled identifiers with CAPABILITY_NOT_FOUND or
+    CAPABILITY_DISABLED. Adding a module does not grant data scopes or change existing
+    module schemas. Versioned module schemas and Registry policy are server-authoritative.
+  current-mvp-agents: [creator, schedule, wellness, diary]
+  future-examples: [blog, music]
+paths:
+  /auth/session:
+    post:
+      tags: [Auth]
+      operationId: createSession
+      security: []
+      summary: Create an authenticated local session
+      description: >-
+        Enrollment/bootstrap method is intentionally unresolved. This operation must
+        be disabled or protected by a one-time local setup mechanism until approved.
+      x-approval-status: pending
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [credential]
+              properties:
+                credential: { type: string, writeOnly: true, minLength: 1 }
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Auth]
+      operationId: revokeSession
+      summary: Revoke the current session
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
+  /privacy/consents:
+    get:
+      tags: [Privacy]
+      operationId: listPrivacyConsents
+      summary: List the current user's active external-processing consents
+      responses:
+        '200':
+          description: Active consent scopes; no consent means deny
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PrivacyConsent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Privacy]
+      operationId: grantPrivacyConsent
+      summary: Record explicit, scoped consent for external processing
+      description: >-
+        The authenticated user must confirm the displayed notice. The server accepts
+        only allowlisted providers and stores a consent receipt. This action does not
+        itself send data to the provider. Consent is separate from publication approval.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrivacyConsentGrant' }
+      responses:
+        '201':
+          description: Consent recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrivacyConsent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /privacy/consents/{consent_id}:
+    delete:
+      tags: [Privacy]
+      operationId: revokePrivacyConsent
+      summary: Revoke consent; queued external calls must be rechecked and blocked
+      description: >-
+        A queued call that has not crossed the egress boundary is cancelled. A call
+        already sent cannot be recalled; its recorded status must be disclosed.
+      parameters:
+        - $ref: '#/components/parameters/ConsentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Consent revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /privacy/external-processing-requests:
+    post:
+      tags: [Privacy]
+      operationId: requestExternalProcessing
+      summary: Request one explicitly consented external-processing operation
+      description: >-
+        This endpoint is not a consent grant. It checks an existing active consent
+        against provider, purpose, data categories, resource ownership and current
+        server policy both at acceptance and immediately before dispatch. Missing,
+        revoked, expired, overbroad or unverifiable consent returns 403 CONSENT_REQUIRED
+        and MUST cause zero outbound requests. The provider is selected from a
+        server-side allowlist. Task creation or user text cannot bypass this gate.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExternalProcessingRequest' }
+      responses:
+        '202':
+          description: Minimalized request queued after policy and consent checks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+  /capabilities:
+    get:
+      tags: [Capabilities]
+      operationId: listCapabilities
+      summary: List enabled, allowlisted modules and their declared scopes
+      responses:
+        '200':
+          description: Capability registry view; does not grant access to data or tools
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Capability' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
+  /assistant/messages:
+    post:
+      tags: [Assistant]
+      operationId: submitAssistantMessage
+      summary: Submit a text request or user-confirmed transcript to Yetu
+      description: >-
+        Local/rule-based routing is preferred. This endpoint does not grant external
+        processing consent; external provider calls require a separate consent record
+        and external-processing request checked by the server.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssistantMessageRequest' }
+      responses:
+        '202':
+          description: Accepted; may create a task requiring user review
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssistantMessageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /voice/transcriptions:
+    post:
+      tags: [Assistant]
+      operationId: transcribeVoice
+      summary: Transcribe submitted audio for user review
+      description: >-
+        Local transcription is the proposed default. Raw audio is not retained after
+        processing. Cloud STT is not selected by this endpoint; any external STT call
+        must go through the external-processing consent gate.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [audio]
+              properties:
+                audio: { type: string, format: binary }
+                locale: { type: string, description: 'Optional BCP-47 locale hint; exact allowlist is pending.' }
+      responses:
+        '200':
+          description: Transcript returned for user review; never treated as approved instruction
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transcript' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMedia' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+  /media/uploads:
+    post:
+      tags: [Media]
+      operationId: createMediaUpload
+      summary: Start an upload for media explicitly selected by the user
+      description: >-
+        Server accepts only declared upload parts. It must not enumerate or read
+        other device/gallery files. Actual content type, size, digest and ownership
+        are validated server-side. Chunking strategy is provisional.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadInitRequest' }
+      responses:
+        '201':
+          description: Upload session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMedia' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /media/uploads/{upload_id}/parts/{part_number}:
+    put:
+      tags: [Media]
+      operationId: putUploadPart
+      summary: Upload one declared part
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+        - name: part_number
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '204': { description: Part accepted or identical retry acknowledged }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMedia' }
+        default: { $ref: '#/components/responses/Error' }
+  /media/uploads/{upload_id}/complete:
+    post:
+      tags: [Media]
+      operationId: completeMediaUpload
+      summary: Verify uploaded media and finalize the selected-media import
+      parameters:
+        - $ref: '#/components/parameters/UploadId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadCompleteRequest' }
+      responses:
+        '200':
+          description: Import finalized; proposal is deduplicated by user and manifest
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaImport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMedia' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /media/{media_id}:
+    get:
+      tags: [Media]
+      operationId: getMediaMetadata
+      summary: Read metadata for an owned uploaded media item
+      parameters:
+        - $ref: '#/components/parameters/MediaId'
+      responses:
+        '200':
+          description: Metadata only; private local path is never returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaAsset' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /content/projects:
+    post:
+      tags: [Projects]
+      operationId: createContentProject
+      summary: Create a Creator project from owned uploaded media
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectCreateRequest' }
+      responses:
+        '201':
+          description: Project created in a reviewable initial state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContentProject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /content/projects/{project_id}:
+    get:
+      tags: [Projects]
+      operationId: getContentProject
+      summary: Read an owned project and its current version
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: Project state and current version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContentProject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /content/projects/{project_id}/rights:
+    get:
+      tags: [Rights]
+      operationId: getRightsDecision
+      summary: Evaluate rights for a version and intended platform/use
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: content_version
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: platform
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/PublishPlatform' }
+      responses:
+        '200':
+          description: Rights result; REVIEW and BLOCK are not publishable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RightsDecision' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Create a work item for an enabled capability
+      description: >-
+        Creator is the MVP priority. Schedule/Wellness/Diary may be routed only when
+        enabled and authorized. Blog/Music are future capabilities and are not
+        enabled merely because their identifiers appear in this schema. The module
+        validates the input object against its own schema and allowed data scopes.
+        Task creation does not authorize external processing or broaden data access.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskCreateRequest' }
+      responses:
+        '202':
+          description: Task accepted; status may await user input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}:
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Read task status, progress and next user action
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Task status; sensitive source text is excluded from diagnostics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/plan:
+    post:
+      tags: [Tasks]
+      operationId: createTaskPlan
+      summary: Generate or retrieve a plan for review
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [base_content_version]
+              properties:
+                base_content_version: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Plan generated; requires a plan checkpoint decision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/checkpoints:
+    get:
+      tags: [Approvals]
+      operationId: listCheckpoints
+      summary: List review checkpoints for an owned task
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Checkpoint list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Checkpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/feedback:
+    post:
+      tags: [Tasks]
+      operationId: submitTaskFeedback
+      summary: Request a revision, pause or cancel at a review checkpoint
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [checkpoint_id, base_content_version, content_hash, action]
+              properties:
+                checkpoint_id: { type: string, format: uuid }
+                base_content_version: { type: integer, minimum: 1 }
+                content_hash: { $ref: '#/components/schemas/Sha256' }
+                action: { type: string, enum: [revise, hold, cancel] }
+                comment: { type: string, maxLength: 4000 }
+      responses:
+        '202':
+          description: Feedback accepted; affected approvals are invalidated on revision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/approvals:
+    post:
+      tags: [Approvals]
+      operationId: createApproval
+      summary: Record an explicit intermediate or final approval
+      description: >-
+        The server MUST validate the allowed checkpoint-kind/approval-scope matrix.
+        A final_publish approval binds the current version hash, rendered artifact SHA-256
+        and exact destination metadata. A final_diary approval binds the exact draft
+        version/hash. Intermediate approval only advances the workflow. No approval can
+        authorize external processing; that uses privacy consent separately.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalRequest' }
+      responses:
+        '201':
+          description: Approval evidence recorded for the exact current artifact
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/render:
+    post:
+      tags: [Rendering]
+      operationId: renderTask
+      summary: Render a specified current content version
+      description: Rendering creates a private preview; it does not authorize publishing.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content_version, content_hash]
+              properties:
+                content_version: { type: integer, minimum: 1 }
+                content_hash: { $ref: '#/components/schemas/Sha256' }
+                render_profile: { type: string, enum: [vertical_9_16_h264_aac] }
+      responses:
+        '202':
+          description: Render job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /jobs/{job_id}:
+    get:
+      tags: [Rendering]
+      operationId: getJob
+      summary: Poll an owned render or processing job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job state and safe progress details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/preview:
+    get:
+      tags: [Rendering]
+      operationId: getTaskPreview
+      summary: Retrieve a private preview for an owned task/version
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - name: content_version
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Private MP4 preview
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Error' }
+  /publishes:
+    post:
+      tags: [Publishing]
+      operationId: createPublish
+      summary: Request publication of one exactly approved artifact
+      description: >-
+        Server MUST fail closed unless the authenticated owner, final_publish approval,
+        current content version/hash and artifact SHA-256, platform/account/visibility/
+        caption binding, rights=ALLOW, account authorization and idempotency record all
+        match. Persist the idempotency record and durable outbox job before dispatch.
+        Intermediate approval, voice transcript, or external-processing consent is not
+        publication approval. If external outcome is uncertain, set outcome_unknown,
+        do not upload again, and reconcile through the official platform API before
+        marking success/failure. Never blind-retry an uncertain publication.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishRequest' }
+      responses:
+        '202':
+          description: New publication accepted after all server-side gates pass
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublishJob' }
+        '200':
+          description: Same idempotency key and request fingerprint; returns the existing publish job without dispatching a second publication
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublishJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+  /publishes/{publish_id}:
+    get:
+      tags: [Publishing]
+      operationId: getPublish
+      summary: Read publication status without triggering another publish
+      parameters:
+        - $ref: '#/components/parameters/PublishId'
+      responses:
+        '200':
+          description: Publish status; mock and real outcomes are distinguished
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublishJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /diaries/drafts:
+    post:
+      tags: [Diary]
+      operationId: createDiaryDraft
+      summary: Create a draft from explicitly allowed source records
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DiaryDraftRequest' }
+      responses:
+        '202':
+          description: Draft generation accepted; not a finalized diary entry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiaryDraft' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /diaries/drafts/{draft_id}:
+    patch:
+      tags: [Diary]
+      operationId: reviseDiaryDraft
+      summary: Revise an owned draft and advance its version
+      parameters:
+        - $ref: '#/components/parameters/DraftId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [base_content_version, feedback]
+              properties:
+                base_content_version: { type: integer, minimum: 1 }
+                feedback: { type: string, minLength: 1, maxLength: 4000 }
+      responses:
+        '200':
+          description: New draft version; prior final approval is invalid
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiaryDraft' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Error' }
+  /diaries/drafts/{draft_id}/finalize:
+    post:
+      tags: [Diary]
+      operationId: finalizeDiaryDraft
+      summary: Save only the exactly approved current diary version
+      description: >-
+        The approval_id must refer to active approval_scope=final_diary for this exact
+        draft, content_version and content_hash. Any other approval scope is rejected.
+      parameters:
+        - $ref: '#/components/parameters/DraftId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content_version, content_hash, approval_id]
+              properties:
+                content_version: { type: integer, minimum: 1 }
+                content_hash: { $ref: '#/components/schemas/Sha256' }
+                approval_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Final diary entry created after server checks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiaryEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-session-token
+      description: Proposed transport; token issuance and storage remain to be approved.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique key per operation attempt; scope and retention are approval items.
+      schema: { type: string, minLength: 16, maxLength: 200 }
+    ConsentId: { name: consent_id, in: path, required: true, schema: { type: string, format: uuid } }
+    UploadId: { name: upload_id, in: path, required: true, schema: { type: string, format: uuid } }
+    MediaId: { name: media_id, in: path, required: true, schema: { type: string, format: uuid } }
+    ProjectId: { name: project_id, in: path, required: true, schema: { type: string, format: uuid } }
+    TaskId: { name: task_id, in: path, required: true, schema: { type: string, format: uuid } }
+    JobId: { name: job_id, in: path, required: true, schema: { type: string, format: uuid } }
+    PublishId: { name: publish_id, in: path, required: true, schema: { type: string, format: uuid } }
+    DraftId: { name: draft_id, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    Unauthorized:
+      description: Missing, invalid or expired authentication
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Forbidden:
+      description: Authenticated but policy, scope, rights or approval gate denied the action
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    NotFound:
+      description: Resource absent or not visible to this owner
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Conflict:
+      description: Stale version/approval, invalid state transition or idempotency conflict
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    ValidationError:
+      description: Request does not satisfy schema or policy input constraints
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    PayloadTooLarge:
+      description: Upload exceeds configured limit
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    UnsupportedMedia:
+      description: Declared or detected media type is not accepted
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    RateLimited:
+      description: Rate limit reached
+      headers:
+        Retry-After: { schema: { type: integer, minimum: 1 } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Unavailable:
+      description: Required local worker or approved integration is unavailable; no publish is claimed
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Error:
+      description: Unexpected safe error; sensitive source text, tokens and private paths are excluded
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+  schemas:
+    ApiError:
+      type: object
+      additionalProperties: false
+      required: [error, request_id]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+        request_id: { type: string, format: uuid }
+    ErrorCode:
+      type: string
+      enum: [VALIDATION_ERROR, AUTHENTICATION_REQUIRED, FORBIDDEN, RESOURCE_NOT_FOUND, CAPABILITY_NOT_FOUND, CAPABILITY_DISABLED, CONSENT_REQUIRED, PRIVACY_POLICY_DENIED, RIGHTS_BLOCKED, RIGHTS_REVIEW_REQUIRED, VERSION_CONFLICT, STALE_APPROVAL, APPROVAL_SCOPE_MISMATCH, INVALID_STATE_TRANSITION, IDEMPOTENCY_CONFLICT, PUBLISH_ALREADY_EXISTS, PLATFORM_NOT_SUPPORTED, OAUTH_EXPIRED, RENDER_FAILED, RATE_LIMITED, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, SERVICE_UNAVAILABLE]
+    SessionResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_at]
+      properties:
+        access_token: { type: string, writeOnly: true }
+        token_type: { type: string, const: Bearer }
+        expires_at: { type: string, format: date-time }
+    PrivacyPurpose:
+      type: string
+      enum: [llm_text, stt, vision_analysis]
+    PrivacyConsentGrant:
+      type: object
+      additionalProperties: false
+      required: [provider_id, purpose, data_categories, notice_id, notice_version, explicitly_confirmed, expires_at]
+      properties:
+        provider_id: { type: string, minLength: 1 }
+        purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
+        data_categories:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
+        notice_version: { type: string }
+        notice_id: { type: string, format: uuid }
+        explicitly_confirmed: { type: boolean, const: true }
+        expires_at: { type: string, format: date-time }
+    PrivacyConsent:
+      type: object
+      additionalProperties: false
+      required: [consent_id, provider_id, purpose, data_categories, notice_id, notice_version, explicitly_confirmed, expires_at, status, created_at]
+      properties:
+        consent_id: { type: string, format: uuid }
+        provider_id: { type: string, minLength: 1 }
+        purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
+        data_categories:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
+        notice_version: { type: string }
+        notice_id: { type: string, format: uuid }
+        explicitly_confirmed: { type: boolean, const: true }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, revoked, expired] }
+        created_at: { type: string, format: date-time }
+    ExternalProcessingRequest:
+      type: object
+      additionalProperties: false
+      required: [consent_id, provider_id, purpose, data_categories, resource_ids]
+      properties:
+        consent_id: { type: string, format: uuid }
+        provider_id: { type: string, minLength: 1 }
+        purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
+        data_categories:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
+        resource_ids:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+        task_id: { type: string, format: uuid }
+    Capability:
+      type: object
+      additionalProperties: false
+      required: [module_id, module_version, status, capability_ids, scopes, input_schema_version]
+      properties:
+        module_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        module_version: { type: string }
+        status: { type: string, enum: [enabled, disabled, planned] }
+        capability_ids: { type: array, items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' } }
+        scopes: { type: array, items: { type: string } }
+        input_schema_version: { type: string }
+    AssistantMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 12000 }
+        confirmed_transcript: { type: boolean, default: false }
+        attachment_ids: { type: array, items: { type: string, format: uuid } }
+    AssistantMessageResponse:
+      type: object
+      additionalProperties: false
+      required: [reply, route, task_id]
+      properties:
+        reply: { type: string }
+        route: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        task_id: { type: string, format: uuid }
+    Transcript:
+      type: object
+      additionalProperties: false
+      required: [transcript_id, text, confirmed, audio_retained]
+      properties:
+        transcript_id: { type: string, format: uuid }
+        text: { type: string }
+        confirmed: { type: boolean, const: false }
+        audio_retained: { type: boolean, const: false }
+    UploadInitRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        project_id: { type: string, format: uuid }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items:
+            type: object
+            additionalProperties: false
+            required: [client_item_id, file_name, declared_media_type, size_bytes, sha256]
+            properties:
+              client_item_id: { type: string, format: uuid }
+              file_name: { type: string, minLength: 1, maxLength: 255 }
+              declared_media_type: { type: string, enum: [image/jpeg, image/png, image/webp, video/mp4, video/quicktime] }
+              size_bytes: { type: integer, minimum: 1 }
+              sha256: { $ref: '#/components/schemas/Sha256' }
+        chunk_size_bytes:
+          type: integer
+          minimum: 262144
+          description: Provisional; exact range and resumable protocol need approval.
+    UploadSession:
+      type: object
+      additionalProperties: false
+      required: [upload_id, status, expires_at, accepted_items]
+      properties:
+        upload_id: { type: string, format: uuid }
+        status: { type: string, enum: [created, uploading, completed, rejected, expired] }
+        expires_at: { type: string, format: date-time }
+        accepted_items:
+          type: array
+          items:
+            type: object
+            required: [client_item_id, received_parts]
+            properties:
+              client_item_id: { type: string, format: uuid }
+              received_parts: { type: array, items: { type: integer, minimum: 1 } }
+    UploadCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [manifest_sha256]
+      properties:
+        manifest_sha256: { $ref: '#/components/schemas/Sha256' }
+        items:
+          type: array
+          items:
+            type: object
+            required: [client_item_id, sha256, size_bytes]
+            properties:
+              client_item_id: { type: string, format: uuid }
+              sha256: { $ref: '#/components/schemas/Sha256' }
+              size_bytes: { type: integer, minimum: 1 }
+    MediaImport:
+      type: object
+      additionalProperties: false
+      required: [import_id, status, media, manifest_sha256, proposal]
+      properties:
+        import_id: { type: string, format: uuid }
+        status: { type: string, enum: [completed, rejected] }
+        manifest_sha256: { $ref: '#/components/schemas/Sha256' }
+        media: { type: array, items: { $ref: '#/components/schemas/MediaAsset' } }
+        proposal:
+          type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [created, already_created, suppressed] }
+            proposal_id: { type: string, format: uuid }
+    MediaAsset:
+      type: object
+      additionalProperties: false
+      required: [media_id, media_type, media_type_verified, size_bytes, sha256, status]
+      properties:
+        media_id: { type: string, format: uuid }
+        media_type: { type: string }
+        media_type_verified: { type: boolean }
+        size_bytes: { type: integer, minimum: 1 }
+        sha256: { $ref: '#/components/schemas/Sha256' }
+        status: { type: string, enum: [available, quarantined, deleted] }
+        captured_at: { type: string, format: date-time }
+    ProjectCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [media_ids]
+      properties:
+        media_ids: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+        style: { type: string, maxLength: 80 }
+        target_seconds: { type: integer, minimum: 5, maximum: 60, default: 30 }
+        aspect_ratio: { type: string, const: '9:16' }
+    ContentProject:
+      type: object
+      additionalProperties: false
+      required: [project_id, status, current_version, media_ids]
+      properties:
+        project_id: { type: string, format: uuid }
+        status: { type: string, enum: [created, planning, review_required, rendering, ready, blocked, failed] }
+        current_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        media_ids: { type: array, items: { type: string, format: uuid } }
+    TaskCreateRequest:
+      type: object
+      additionalProperties: false
+      description: The Registry validates module_id, capability_id and input_schema_version before accepting input.
+      required: [module_id, capability_id, input_schema_version, input]
+      properties:
+        module_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        capability_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        input_schema_version: { type: string, minLength: 1, maxLength: 64 }
+        project_id: { type: string, format: uuid }
+        confirmed_transcript: { type: boolean, default: false }
+        input: { type: object, additionalProperties: true }
+    Task:
+      type: object
+      additionalProperties: false
+      required: [task_id, module_id, capability_id, status, current_version, created_at]
+      properties:
+        task_id: { type: string, format: uuid }
+        module_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        capability_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        status:
+          type: string
+          enum: [created, planning, waiting_plan_approval, drafting, waiting_draft_approval, revising, rendering, waiting_preview_approval, waiting_final_publish_approval, waiting_final_diary_approval, ready_to_publish, publish_queued, publishing, outcome_unknown, reconciling, needs_user_action, published, saved, on_hold, cancelled, failed, rights_blocked, stale_approval]
+        current_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        progress_percent: { type: integer, minimum: 0, maximum: 100 }
+        next_action: { type: string, enum: [review_plan, review_draft, review_preview, final_approval, none] }
+        created_at: { type: string, format: date-time }
+    Checkpoint:
+      type: object
+      additionalProperties: false
+      description: >-
+        Allowed pairs: plan/draft/preview + continue; final_publish + final_publish;
+        final_diary + final_diary. All other kind/scope pairs are invalid.
+      required: [checkpoint_id, kind, status, content_version, content_hash, approval_scope]
+      properties:
+        checkpoint_id: { type: string, format: uuid }
+        kind: { type: string, enum: [plan, draft, preview, final_publish, final_diary] }
+        status: { type: string, enum: [pending, approved, revision_requested, on_hold, cancelled, invalidated] }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        approval_scope: { type: string, enum: [continue, final_publish, final_diary] }
+    ApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [checkpoint_id, content_version, content_hash, approval_scope]
+      properties:
+        checkpoint_id: { type: string, format: uuid }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        approval_scope: { type: string, enum: [continue, final_publish, final_diary] }
+        artifact_sha256:
+          allOf: [{ $ref: '#/components/schemas/Sha256' }]
+          description: Required for final_publish; SHA-256 of exact rendered MP4 bytes.
+        publish_target: { $ref: '#/components/schemas/PublishTarget' }
+      allOf:
+        - if:
+            properties:
+              approval_scope: { const: final_publish }
+            required: [approval_scope]
+          then:
+            required: [artifact_sha256, publish_target]
+        - if:
+            properties:
+              approval_scope: { const: final_diary }
+            required: [approval_scope]
+          then:
+            not:
+              required: [publish_target]
+    Approval:
+      type: object
+      additionalProperties: false
+      description: >-
+        content_hash binds the canonical content version; approval_hash binds scope,
+        checkpoint, version/hash and, for final_publish, artifact_sha256 and publish_target.
+      required: [approval_id, task_id, checkpoint_id, content_version, content_hash, approval_hash, approval_scope, status, approved_at]
+      properties:
+        approval_id: { type: string, format: uuid }
+        task_id: { type: string, format: uuid }
+        checkpoint_id: { type: string, format: uuid }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        approval_hash: { $ref: '#/components/schemas/Sha256' }
+        approval_scope: { type: string, enum: [continue, final_publish, final_diary] }
+        status: { type: string, enum: [active, invalidated, consumed] }
+        publish_target: { $ref: '#/components/schemas/PublishTarget' }
+        approved_at: { type: string, format: date-time }
+    Job:
+      type: object
+      additionalProperties: false
+      required: [job_id, task_id, kind, status, progress_percent]
+      properties:
+        job_id: { type: string, format: uuid }
+        task_id: { type: string, format: uuid }
+        kind: { type: string, enum: [render, transcription, external_processing] }
+        status: { type: string, enum: [queued, running, succeeded, failed, cancelled, blocked, outcome_unknown, reconciling, needs_user_action] }
+        progress_percent: { type: integer, minimum: 0, maximum: 100 }
+        safe_error_code: { type: string }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+    PublishPlatform:
+      type: string
+      enum: [youtube, instagram, tiktok]
+    PublishTarget:
+      type: object
+      additionalProperties: false
+      required: [platform, account_id, visibility, caption]
+      properties:
+        platform: { $ref: '#/components/schemas/PublishPlatform' }
+        account_id: { type: string, format: uuid }
+        visibility: { type: string, enum: [private, unlisted, public, followers] }
+        caption: { type: string, maxLength: 5000 }
+    RightsDecision:
+      type: object
+      additionalProperties: false
+      required: [decision, content_version, content_hash, platform, checked_at, reasons]
+      properties:
+        decision: { type: string, enum: [ALLOW, REVIEW, BLOCK] }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        platform: { $ref: '#/components/schemas/PublishPlatform' }
+        checked_at: { type: string, format: date-time }
+        reasons: { type: array, items: { type: string } }
+    PublishRequest:
+      type: object
+      additionalProperties: false
+      required: [task_id, project_id, content_version, content_hash, artifact_sha256, approval_id, platform, account_id, visibility, caption]
+      properties:
+        task_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        approval_id: { type: string, format: uuid }
+        platform: { $ref: '#/components/schemas/PublishPlatform' }
+        account_id: { type: string, format: uuid }
+        visibility: { type: string, enum: [private, unlisted, public, followers] }
+        caption: { type: string, maxLength: 5000 }
+    PublishJob:
+      type: object
+      additionalProperties: false
+      required: [publish_id, status, mode, platform, content_version, content_hash, artifact_sha256, approval_id]
+      properties:
+        publish_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, uploading, outcome_unknown, reconciling, succeeded, failed, blocked, needs_user_action] }
+        mode: { type: string, enum: [mock, real] }
+        platform: { $ref: '#/components/schemas/PublishPlatform' }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        approval_id: { type: string, format: uuid }
+        external_id: { type: string }
+        url: { type: string, format: uri }
+        safe_error_code: { type: string }
+        reconciliation_status: { type: string, enum: [not_needed, pending, querying_platform, matched_success, matched_failure, inconclusive, user_action_required] }
+        platform_operation_id: { type: string }
+        next_retry_at: { type: string, format: date-time, description: 'Only for safe reconciliation queries; never signals blind re-upload.' }
+    DiaryDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [date, allowed_source_ids]
+      properties:
+        date: { type: string, format: date }
+        allowed_source_ids: { type: array, items: { type: string, format: uuid } }
+        tone: { type: string, maxLength: 80 }
+    DiaryDraft:
+      type: object
+      additionalProperties: false
+      required: [draft_id, content_version, status, content_hash]
+      properties:
+        draft_id: { type: string, format: uuid }
+        content_version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [draft, review_required, finalized] }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        body: { type: string }
+    DiaryEntry:
+      type: object
+      additionalProperties: false
+      required: [entry_id, date, approved_content_version, content_hash, finalized_at]
+      properties:
+        entry_id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        approved_content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        finalized_at: { type: string, format: date-time }
+    Sha256:
+      type: string
+      pattern: '^[a-fA-F0-9]{64}$'
+      description: A 64-character SHA-256 hex digest; what is hashed depends on the field definition above.

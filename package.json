@@ -1,0 +1,10 @@
+{
+  "name": "haejumi-ai-reference-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test backend/tests/*.test.js",
+    "start": "node backend/src/adapters/node-http/server.js"
+  }
+}
