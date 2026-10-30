@@ -17,6 +17,9 @@
 ## 구현과 계약의 대기 항목
 
 - 프로젝트 생성 응답의 `task_id`는 상태 조회를 연결하기 위한 추가 제안이며 계약 승인 대기입니다.
-- 현재 참조 업로드 어댑터는 한 세션에 선택 파일 1개, 단일 part만 수용합니다. OpenAPI의 다중 항목·재개 업로드 계약은 아직 확정되지 않았습니다.
-- manifest canonicalization은 어댑터 내부에서만 임시 규칙을 사용합니다. 이 규칙은 호환성 보장이나 승인된 wire 계약이 아닙니다.
+- 현재 참조 업로드 어댑터와 YAML 스키마는 한 세션에 선택 파일 1개, 단일 part로 정렬했습니다. 여러 선택 파일은 별도 세션을 사용합니다. 다중 항목·재개 업로드 계약은 승인 대기입니다.
+- manifest canonicalization은 한 파일 배열에 대한 임시 규칙으로 문서화했지만 승인 대기입니다. 다중 파일 정렬·정규화는 정하지 않았습니다.
+- `ContentProject.task_id`는 최소 task polling에 필요한 추가 제안이며 승인 대기입니다. 완료 요청은 import를 반환하고 프로젝트/task 생성은 별도 프로젝트 API에서 수행하며, 동일 미디어/설정은 의미적 중복 키로 deduplicate합니다.
+- 실제 파일 확인은 지원 형식 signature 및 컨테이너 구조를 검사합니다. 로컬 FFmpeg/ffprobe 등 decoder가 없어 전체 codec decoding은 미검증입니다.
+- Creator 렌더 API의 상세 계약은 승인 대기 상태입니다. API 실행 흐름은 참조 어댑터에 구현했고 OpenAPI 3.1 정식 validator 검사는 미실행입니다. 현재 PC PATH에 FFmpeg/ffprobe가 없어 실영상 렌더·실제 ffprobe 검증도 실행하지 못했습니다.
 - 테스트 서버의 정적 Bearer 토큰과 파일 저장소는 교체용 개발 adapter입니다. 최종 인증, DB, 배포·TLS 선택을 확정하지 않습니다.

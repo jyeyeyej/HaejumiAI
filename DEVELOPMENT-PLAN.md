@@ -4,7 +4,7 @@
 > 제품 확정 기능은 바꾸지 않습니다. 기술, 세부 API 및 추정 일정은 승인 전까지 [제안]입니다.
 
 ## A. 목표와 첫 동작 시나리오
-**첫 성공 기준:** Android Photo Picker에서 본인 사진 8장·짧은 영상 2개를 직접 선택 → 인증된 PC 서버로 업로드 → 업로드 완료 제안 → 기획/자막·음악 중간 컨펌 → FFmpeg 9:16 15~30초 MP4 생성 → Android 미리보기·수정→ 버전 갱신·저작권 게이트 → 게시물별 최종 승인 준비. SNS 실제 게시 성공은 별도 API 승인 단계입니다.
+**첫 성공 기준:** Android Photo Picker에서 본인 사진 8장·짧은 영상 2개를 직접 선택 → 인증된 PC 서버로 업로드 → 업로드 완료 제안 → 기획/자막·음악 중간 컨펌 → FFmpeg로 1080×1920, 9:16, H.264/AAC, 30fps MP4 생성(사용자 설정 3~59초, 기본 30초) → ffprobe 검증 → Android 미리보기·수정→ 버전 갱신·저작권 게이트 → 게시물별 최종 승인 준비. SNS 실제 게시 성공은 별도 API 승인 단계입니다.
 
 **Supervisor(예투)**는 라우팅·승인상태를 조정합니다. 전문 Agent는 **Creator(최우선), Schedule, Wellness, Diary** 4개이며 Work Agent는 제외. 1인용 Android 앱 중심, Windows PC 로컬 서버; Kotlin/Compose·FastAPI·PostgreSQL은 현재 구현 **제안**이며, Android 모바일 우선 제품 방향만 확정입니다. APK 직접 설치·Play Store 미등록은 승인 근거가 없어 **결정 대기**입니다.
 
@@ -23,7 +23,8 @@
 | P0C API 승인 | `/api/v1` OpenAPI 요청/응답·오류·상태/권한 계약 확정 | API 리뷰 승인, 계약 테스트 초안 | 사용자의 선택 필요 |
 | P1A 보안 | 사용자 인증, 파일 경로 격리, PrivacyGate, 비밀관리 | 무인증/외부전송/경로탐색 차단 테스트 | P0B |
 | P1B 업로드 | 선택 파일만 받아 검증·해시·원본 저장, manifest 완료 | 위변조·부분·중복 검증, 원본 불변 | P1A |
-| P1C 로컬 렌더 | 로컬 FFmpeg 기반 사진·짧은 영상 혼합 | 9:16 MP4 재현·오류 처리 | P1B |
+| P1C 로컬 렌더 | 선택 업로드 → plan/draft 승인 → 소유 미디어만 render job → 상태/취소 → 인증 미리보기 | 9:16 MP4 재현·ffprobe 검증·실패/중복 처리; 테스트 렌더는 simulated 표기 | P1B |
+| P1D 게시 정보·독립 승인 | 공통 렌더 task에 플랫폼별 문구/계정/공개범위 저장, 수정·조회, 각 플랫폼의 독립 final approval | 현재 revision/hash와 영상 버전/파일 해시를 결합; 실제 FFmpeg+ffprobe와 미리보기 승인 전 publish_ready 금지; SNS 호출 없음 | P1C |
 | P2 Creator | 컷 순서/스타일, 자막, 권리 검증된 무료 로컬 음악 | 미검증 음원 게시 차단, 렌더 개선 | P1C |
 | P3 승인·복구 | 계획/자막·음악/미리보기 체크포인트, 최신 버전 해시, 보류·재개 | 수정 후 이전 승인 409, 무승인 저장·게시 0건 | P2 |
 | P4 Android | [제안] Kotlin/Compose 앱 후보, Photo Picker, 선택 업로드 진행률·제안·STT 교정 | 실기기에서 업로드→제안→미리보기·수정·승인 | P1~P3 |

@@ -10,9 +10,11 @@ info:
   x-implementation-slice:
     status: proposed-pending-contract-approval
     notes:
-      - Project creation creates an initial Creator task and returns task_id for polling.
-      - The reference adapter accepts one selected media item and one body part per upload session.
-      - Manifest canonicalization and chunk addressing remain approval items.
+      - Project creation creates an initial Creator task and a pending plan checkpoint; plan and draft continue approvals are required before render.
+      - The reference adapter accepts one selected media item and one body part per upload session; each selected media item needs its own session.
+      - Render jobs use only media already attached to the owned project; requests cannot provide paths or arbitrary media IDs.
+      - Test renderer results use status simulated and a non-video preview media type; they are never verified MP4 output.
+      - Multi-item chunk addressing, full codec decoding and final task linkage remain approval or verification items.
 servers:
   - url: /api/v1
     description: Base path proposal; deployment origin and TLS remain undecided.
@@ -321,8 +323,9 @@ paths:
         Server accepts only declared upload parts. It must not enumerate or read
         other device/gallery files. Actual content type, size, digest and ownership
         are validated server-side. The current replaceable reference adapter accepts
-        one selected item per session and one complete body at part_number=1. Multi-item
-        sessions and resumable chunk semantics remain proposals pending approval.
+        one selected item per session and one complete body at part_number=1. Each
+        selected item is uploaded through a separate session. Multi-item sessions and
+        resumable chunk semantics remain proposals pending approval.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -351,7 +354,8 @@ paths:
         - name: part_number
           in: path
           required: true
-          schema: { type: integer, minimum: 1 }
+          description: Current adapter supports only part 1; resumable chunk rules are pending approval.
+          schema: { type: integer, minimum: 1, maximum: 1 }
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -371,6 +375,10 @@ paths:
       tags: [Media]
       operationId: completeMediaUpload
       summary: Verify uploaded media and finalize the selected-media import
+      description: >-
+        Repeating completion for the same owner and manifest returns the existing
+        import/media/proposal. This operation does not create a project or task;
+        project creation is a separate idempotent operation.
       parameters:
         - $ref: '#/components/parameters/UploadId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -416,7 +424,9 @@ paths:
       description: >-
         This proposed initial slice also creates an idle Creator task and returns its
         task_id so the client can poll GET /tasks/{task_id}. This additive response
-        field is pending API contract approval.
+        field is pending API contract approval. Repeating the same owner, ordered
+        media_ids and project settings returns the same project/task even with a new
+        idempotency key; changing settings creates a separate project.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -613,10 +623,8 @@ paths:
       summary: Record an explicit intermediate or final approval
       description: >-
         The server MUST validate the allowed checkpoint-kind/approval-scope matrix.
-        A final_publish approval binds the current version hash, rendered artifact SHA-256
-        and exact destination metadata. A final_diary approval binds the exact draft
-        version/hash. Intermediate approval only advances the workflow. No approval can
-        authorize external processing; that uses privacy consent separately.
+        In the first Creator render slice, plan and draft checkpoints require separate continue approvals bound to the same current version/hash; only then is task status render_ready.
+        This generic checkpoint route records only continue approvals for plan, draft and preview checkpoints. Platform final approvals use the separate publication-specific approval route and bind a single publication ID. No approval can authorize external processing; that uses privacy consent separately.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -637,12 +645,125 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/publications:
+    get:
+      tags: [Publishing]
+      operationId: listTaskPublications
+      summary: List separately stored platform posting information for an owned task
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Platform-specific records; one record per platform and task
+          content:
+            application/json:
+              schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/PublicationRecord' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Publishing]
+      operationId: createTaskPublication
+      summary: Save posting information for one platform; does not publish
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublicationInput' }
+      responses:
+        '201':
+          description: Draft metadata saved; no platform request is made
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicationRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/publications/{publication_id}:
+    get:
+      tags: [Publishing]
+      operationId: getTaskPublication
+      summary: Read one owned platform posting record
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/PublicationId'
+      responses:
+        '200':
+          description: Exact saved platform metadata and revision state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicationRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Publishing]
+      operationId: updateTaskPublication
+      summary: Update one platform record and invalidate its prior final approval
+      description: Requires the current revision. Any changed field increments revision, invalidates approvals attached to this publication only and returns it to draft. No posting call is made.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/PublicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/PublicationInput'
+                - type: object
+                  required: [revision]
+                  properties: { revision: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: Updated draft metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicationRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/publications/{publication_id}/approvals:
+    post:
+      tags: [Publishing, Approvals]
+      operationId: approvePublicationTarget
+      summary: Explicitly approve one exact platform publication target
+      description: Requires a current ffprobe-verified real FFmpeg artifact and an approved preview. Binds task version/hash, artifact hash, publication revision/hash, platform, account, visibility and text. Approval only changes metadata state to publish_ready; no SNS API call or post is implemented.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/PublicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublicationApprovalRequest' }
+      responses:
+        '201':
+          description: Platform-specific final approval evidence
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicationApproval' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
   /tasks/{task_id}/render:
     post:
       tags: [Rendering]
       operationId: renderTask
       summary: Render a specified current content version
-      description: Rendering creates a private preview; it does not authorize publishing.
+      description: >-
+        Rendering creates a private preview; it does not authorize publishing. The server requires active plan and draft continue approvals for the current version/hash and obtains inputs only from the authenticated owner's project. Test renderer results are explicitly simulated, are not MP4, and are never marked artifact_verified.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -658,6 +779,10 @@ paths:
                 content_version: { type: integer, minimum: 1 }
                 content_hash: { $ref: '#/components/schemas/Sha256' }
                 render_profile: { type: string, enum: [vertical_9_16_h264_aac] }
+                target_seconds: { type: integer, minimum: 3, maximum: 59, default: 30, description: Final output must remain shorter than 60 seconds. }
+                framing: { type: string, enum: [fit_pad, fill_crop], default: fit_pad, description: fit_pad preserves the full source frame; fill_crop uses the supplied focal point. }
+                focal_x: { type: number, minimum: 0, maximum: 1, default: 0.5 }
+                focal_y: { type: number, minimum: 0, maximum: 1, default: 0.5 }
       responses:
         '202':
           description: Render job queued
@@ -705,6 +830,27 @@ paths:
           content:
             video/mp4:
               schema: { type: string, format: binary }
+            application/x-haejumi-test-preview:
+              schema: { type: string, format: binary, description: Test renderer marker bytes only; never a video. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Error' }
+  /jobs/{job_id}/cancel:
+    post:
+      tags: [Rendering]
+      operationId: cancelJob
+      summary: Cancel an owned queued or running render job
+      description: Cancellation is best effort once FFmpeg is running; a cancelled job cannot publish or expose a verified preview.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Current job state after cancellation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
@@ -869,6 +1015,7 @@ components:
     MediaId: { name: media_id, in: path, required: true, schema: { type: string, format: uuid } }
     ProjectId: { name: project_id, in: path, required: true, schema: { type: string, format: uuid } }
     TaskId: { name: task_id, in: path, required: true, schema: { type: string, format: uuid } }
+    PublicationId: { name: publication_id, in: path, required: true, schema: { type: string, format: uuid } }
     JobId: { name: job_id, in: path, required: true, schema: { type: string, format: uuid } }
     PublishId: { name: publish_id, in: path, required: true, schema: { type: string, format: uuid } }
     DraftId: { name: draft_id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -929,7 +1076,7 @@ components:
         request_id: { type: string, format: uuid }
     ErrorCode:
       type: string
-      enum: [VALIDATION_ERROR, AUTHENTICATION_REQUIRED, FORBIDDEN, RESOURCE_NOT_FOUND, CAPABILITY_NOT_FOUND, CAPABILITY_DISABLED, CONSENT_REQUIRED, PRIVACY_POLICY_DENIED, RIGHTS_BLOCKED, RIGHTS_REVIEW_REQUIRED, VERSION_CONFLICT, STALE_APPROVAL, APPROVAL_SCOPE_MISMATCH, INVALID_STATE_TRANSITION, IDEMPOTENCY_CONFLICT, PUBLISH_ALREADY_EXISTS, PLATFORM_NOT_SUPPORTED, OAUTH_EXPIRED, RENDER_FAILED, RATE_LIMITED, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, SERVICE_UNAVAILABLE]
+      enum: [VALIDATION_ERROR, AUTHENTICATION_REQUIRED, FORBIDDEN, RESOURCE_NOT_FOUND, CAPABILITY_NOT_FOUND, CAPABILITY_DISABLED, CONSENT_REQUIRED, PRIVACY_POLICY_DENIED, RIGHTS_BLOCKED, RIGHTS_REVIEW_REQUIRED, VERSION_CONFLICT, STALE_APPROVAL, APPROVAL_SCOPE_MISMATCH, INVALID_STATE_TRANSITION, IDEMPOTENCY_CONFLICT, PUBLICATION_ALREADY_EXISTS, PUBLISH_ALREADY_EXISTS, PLATFORM_NOT_SUPPORTED, OAUTH_EXPIRED, RENDER_REQUIRED, RENDER_FAILED, RATE_LIMITED, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, SERVICE_UNAVAILABLE]
     SessionResponse:
       type: object
       additionalProperties: false
@@ -1039,7 +1186,7 @@ components:
         items:
           type: array
           minItems: 1
-          maxItems: 30
+          maxItems: 1
           items:
             type: object
             additionalProperties: false
@@ -1050,10 +1197,6 @@ components:
               declared_media_type: { type: string, enum: [image/jpeg, image/png, image/webp, video/mp4, video/quicktime] }
               size_bytes: { type: integer, minimum: 1 }
               sha256: { $ref: '#/components/schemas/Sha256' }
-        chunk_size_bytes:
-          type: integer
-          minimum: 262144
-          description: Provisional; exact range and resumable protocol need approval.
     UploadSession:
       type: object
       additionalProperties: false
@@ -1073,9 +1216,15 @@ components:
     UploadCompleteRequest:
       type: object
       additionalProperties: false
+      description: >-
+        Current one-item adapter hashes UTF-8 bytes of compact JSON for an array with
+        exactly one object in this field order: client_item_id (lowercase UUID),
+        sha256 (lowercase hex) and size_bytes (integer). This canonicalization is
+        provisional and remains pending API approval. If items is provided it must
+        match the upload session exactly.
       required: [manifest_sha256]
       properties:
-        manifest_sha256: { $ref: '#/components/schemas/Sha256' }
+        manifest_sha256: { allOf: [{ $ref: '#/components/schemas/Sha256' }], description: SHA-256 of the provisional canonical manifest described above. }
         items:
           type: array
           items:
@@ -1107,7 +1256,7 @@ components:
       properties:
         media_id: { type: string, format: uuid }
         media_type: { type: string }
-        media_type_verified: { type: boolean }
+        media_type_verified: { type: boolean, description: Signature and container-structure checks passed; this does not assert full codec decoding. }
         size_bytes: { type: integer, minimum: 1 }
         sha256: { $ref: '#/components/schemas/Sha256' }
         status: { type: string, enum: [available, quarantined, deleted] }
@@ -1119,8 +1268,11 @@ components:
       properties:
         media_ids: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
         style: { type: string, maxLength: 80 }
-        target_seconds: { type: integer, minimum: 5, maximum: 60, default: 30 }
+        target_seconds: { type: integer, minimum: 3, maximum: 59, default: 30, description: Desired video duration in seconds; accepted range is 3 through 59 (60 is excluded). }
         aspect_ratio: { type: string, const: '9:16' }
+        framing: { type: string, enum: [fit_pad, fill_crop], default: fit_pad }
+        focal_x: { type: number, minimum: 0, maximum: 1, default: 0.5 }
+        focal_y: { type: number, minimum: 0, maximum: 1, default: 0.5 }
     ContentProject:
       type: object
       additionalProperties: false
@@ -1132,6 +1284,12 @@ components:
         current_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         media_ids: { type: array, items: { type: string, format: uuid } }
+        style: { type: string, maxLength: 80 }
+        target_seconds: { type: integer, minimum: 3, maximum: 59 }
+        aspect_ratio: { type: string, const: '9:16' }
+        framing: { type: string, enum: [fit_pad, fill_crop] }
+        focal_x: { type: number, minimum: 0, maximum: 1 }
+        focal_y: { type: number, minimum: 0, maximum: 1 }
     TaskCreateRequest:
       type: object
       additionalProperties: false
@@ -1150,16 +1308,20 @@ components:
       required: [task_id, module_id, capability_id, status, current_version, created_at]
       properties:
         task_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
         module_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
         capability_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
         status:
           type: string
-          enum: [created, planning, waiting_plan_approval, drafting, waiting_draft_approval, revising, rendering, waiting_preview_approval, waiting_final_publish_approval, waiting_final_diary_approval, ready_to_publish, publish_queued, publishing, outcome_unknown, reconciling, needs_user_action, published, saved, on_hold, cancelled, failed, rights_blocked, stale_approval]
+          enum: [created, planning, waiting_plan_approval, drafting, waiting_draft_approval, render_ready, revising, rendering, render_simulated, waiting_preview_approval, preview_approved, waiting_final_publish_approval, waiting_final_diary_approval, ready_to_publish, publish_queued, publishing, outcome_unknown, reconciling, needs_user_action, published, saved, on_hold, cancelled, failed, rights_blocked, stale_approval]
         current_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         progress_percent: { type: integer, minimum: 0, maximum: 100 }
         next_action: { type: string, enum: [review_plan, review_draft, review_preview, final_approval, none] }
+        active_job_id: { type: string, format: uuid }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
         created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Checkpoint:
       type: object
       additionalProperties: false
@@ -1174,6 +1336,8 @@ components:
         content_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         approval_scope: { type: string, enum: [continue, final_publish, final_diary] }
+        summary: { type: string, maxLength: 500 }
+        approval_id: { type: string, format: uuid }
     ApprovalRequest:
       type: object
       additionalProperties: false
@@ -1182,25 +1346,7 @@ components:
         checkpoint_id: { type: string, format: uuid }
         content_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
-        approval_scope: { type: string, enum: [continue, final_publish, final_diary] }
-        artifact_sha256:
-          allOf: [{ $ref: '#/components/schemas/Sha256' }]
-          description: Required for final_publish; SHA-256 of exact rendered MP4 bytes.
-        publish_target: { $ref: '#/components/schemas/PublishTarget' }
-      allOf:
-        - if:
-            properties:
-              approval_scope: { const: final_publish }
-            required: [approval_scope]
-          then:
-            required: [artifact_sha256, publish_target]
-        - if:
-            properties:
-              approval_scope: { const: final_diary }
-            required: [approval_scope]
-          then:
-            not:
-              required: [publish_target]
+        approval_scope: { type: string, const: continue }
     Approval:
       type: object
       additionalProperties: false
@@ -1228,15 +1374,85 @@ components:
         job_id: { type: string, format: uuid }
         task_id: { type: string, format: uuid }
         kind: { type: string, enum: [render, transcription, external_processing] }
-        status: { type: string, enum: [queued, running, succeeded, failed, cancelled, blocked, outcome_unknown, reconciling, needs_user_action] }
+        status: { type: string, enum: [queued, running, succeeded, simulated, failed, cancelled, blocked, outcome_unknown, reconciling, needs_user_action] }
         progress_percent: { type: integer, minimum: 0, maximum: 100 }
         safe_error_code: { type: string }
         content_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        renderer_mode: { type: string, enum: [ffmpeg, test] }
+        artifact_verified: { type: boolean }
+        preview_ready: { type: boolean }
+        render_profile: { type: string, enum: [vertical_9_16_h264_aac] }
+        target_seconds: { type: integer, minimum: 3, maximum: 59 }
+        framing: { type: string, enum: [fit_pad, fill_crop] }
+        focal_x: { type: number, minimum: 0, maximum: 1 }
+        focal_y: { type: number, minimum: 0, maximum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
     PublishPlatform:
       type: string
       enum: [youtube, instagram, tiktok]
+    PublicationInput:
+      type: object
+      additionalProperties: false
+      required: [platform, account_id, visibility, title, description, hashtags]
+      properties:
+        platform: { $ref: '#/components/schemas/PublishPlatform' }
+        account_id: { type: string, minLength: 1, maxLength: 128, description: Opaque platform account identifier; never an access token. }
+        visibility: { type: string, enum: [private, unlisted, public, followers] }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 5000 }
+        hashtags: { type: array, maxItems: 30, items: { type: string, minLength: 1, maxLength: 100 } }
+    PublicationRecord:
+      allOf:
+        - $ref: '#/components/schemas/PublicationInput'
+        - type: object
+          required: [publication_id, task_id, revision, metadata_hash, status, created_at, updated_at]
+          properties:
+            publication_id: { type: string, format: uuid }
+            task_id: { type: string, format: uuid }
+            revision: { type: integer, minimum: 1 }
+            metadata_hash: { $ref: '#/components/schemas/Sha256' }
+            status: { type: string, enum: [draft, publish_ready] }
+            approval_id: { type: [string, 'null'], format: uuid }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    PublicationApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [content_version, content_hash, artifact_sha256, publication_revision, publication_hash]
+      properties:
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        publication_revision: { type: integer, minimum: 1 }
+        publication_hash: { $ref: '#/components/schemas/Sha256' }
+    PublicationApproval:
+      type: object
+      additionalProperties: false
+      required: [approval_id, task_id, publication_id, platform, account_id, visibility, title, description, hashtags, content_version, content_hash, artifact_sha256, publication_revision, publication_hash, approval_scope, approval_hash, status, approved_at]
+      properties:
+        approval_id: { type: string, format: uuid }
+        task_id: { type: string, format: uuid }
+        publication_id: { type: string, format: uuid }
+        platform: { $ref: '#/components/schemas/PublishPlatform' }
+        account_id: { type: string, minLength: 1, maxLength: 128 }
+        visibility: { type: string, enum: [private, unlisted, public, followers] }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 5000 }
+        hashtags: { type: array, maxItems: 30, items: { type: string } }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        publication_revision: { type: integer, minimum: 1 }
+        publication_hash: { $ref: '#/components/schemas/Sha256' }
+        approval_scope: { const: final_publish }
+        approval_hash: { $ref: '#/components/schemas/Sha256' }
+        status: { type: string, enum: [active, invalidated] }
+        approved_at: { type: string, format: date-time }
     PublishTarget:
       type: object
       additionalProperties: false

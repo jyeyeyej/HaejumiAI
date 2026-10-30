@@ -12,6 +12,11 @@
 - 오류: `{error:{code,message,details}, request_id}`. 토큰과 파일 경로 노출 금지.
 - 게시 재시도는 요청 멱등 기록과 durable outbox를 남기며, 결과 불명 시 `outcome_unknown`으로 보류 후 공식 API 조회로 조정합니다. 불명 상태에서 자동 재업로드하지 않습니다.
 
+## Creator 렌더 출력 v0.4 — 규격 확정, 세부 API 승인 대기
+- Creator 공통 프로필은 9:16, 1080×1920, MP4/H.264/AAC, 30fps입니다. 기본 30초, 사용자 설정 3~59초이며 60초 이상은 거부합니다.
+- 렌더 요청 제안은 `fit_pad`(전체 원본 표시, 여백 허용) 또는 `fill_crop`(0~1 정규화 초점 좌표)을 지원합니다. 자막·오버레이는 좌우 10%, 상단 15%, 하단 20% 예약 영역 안에 둡니다.
+- 로컬 FFmpeg 이후 ffprobe가 규격을 확인하며 실패/불일치 시 ready 상태가 될 수 없습니다. API 초안은 계약 승인 대기입니다. 참조 구현은 plan·draft 각각의 `continue` 승인 뒤 렌더 job을 만들고 테스트 결과와 실영상 검증 결과를 구분합니다.
+
 ## 통일 API 후보 계약 v0.5 — [제안/승인 대기]
 
 > **아직 사용자 승인이 없는 API 설계안입니다.** 아래 경로는 오직 하나의 `/api/v1` 접두사를 사용합니다. 이전 전달서의 `/api/projects` 형태 및 과거 `/content/projects` 예시는 역사 기록(archive)에 보관하고 이 문서에서는 실행 기준에서 제외합니다. 실제 OpenAPI 및 backend validation adapter 확정 전엔 계약 변경 금지.
@@ -32,9 +37,13 @@
 | POST | `/tasks/{id}/feedback` | 수정·승인·보류·취소 | checkpoint, version, hash |
 | GET | `/tasks/{id}/checkpoints` | 승인 대기·이력 | 인증/소유권 |
 | GET | `/tasks/{id}` | 상태·진행률 | 인증/소유권 |
-| POST | `/tasks/{id}/approvals` | 중간/최종 승인 증거 생성 | scope·현재 version/hash 서버 검증 |
+| POST | `/tasks/{id}/approvals` | plan/draft/preview 중간 승인 증거 생성 | continue scope·현재 version/hash 서버 검증; 게시 최종 승인은 publication별 경로 사용 |
+| POST/GET | `/tasks/{id}/publications` | 플랫폼 게시 정보 생성/목록 조회 | 계정·공개범위·제목·설명·해시태그별 저장 |
+| GET/PATCH | `/tasks/{id}/publications/{publication_id}` | 게시 정보 단건 조회/수정 | 소유권/revision/hash 검사; 변경 시 연결 승인 무효화 |
+| POST | `/tasks/{id}/publications/{publication_id}/approvals` | 해당 플랫폼 독립 최종 승인 | 실 FFmpeg+ffprobe+현재 preview 승인 및 모든 해시 검증 |
 | POST | `/tasks/{id}/render` | 특정 버전 렌더 요청 | version/hash 검사; 렌더는 게시 승인 아님 |
 | GET | `/jobs/{id}` | 비동기 작업 상태 조회 | 인증/소유권, 민감 오류 제거 |
+| POST | `/jobs/{id}/cancel` | 소유한 대기/실행 렌더 작업 취소 | 인증/소유권; 실행 중 취소는 best effort |
 | GET | `/tasks/{id}/preview` | 승인 전 영상 미리보기 | 인증/소유권, 비공개 |
 | GET | `/content/projects/{id}/rights` | 라이선스·권리 상태 | REVIEW/BLOCK 구분 |
 | POST | `/publishes` | 게시물별 승인된 버전 게시 | 승인 해시, 권리, 계정/범위, 멱등성 |
@@ -52,7 +61,9 @@
 - 모든 변경 요청은 멱등 키 적용 대상으로 제안합니다. 키의 보존 기간·scope·충돌 규칙은 아직 승인되지 않았습니다.
 
 ### 최소 Creator 준비 슬라이스 — [제안/승인 대기]
-선택 업로드 완료 뒤 `POST /content/projects`가 초기 `created` 상태의 Creator task를 만들고 응답 `task_id`로 `GET /tasks/{task_id}` 조회를 가능하게 하는 응답 확장을 제안합니다. OpenAPI `ContentProject.task_id`는 이를 위한 추가 필드이며 승인 전 계약 확정으로 간주하지 않습니다. 참조 어댑터는 업로드 세션당 미디어 1개·part 1개만 받습니다. 여러 항목/재개 chunk 계약과 manifest canonicalization은 승인 전까지 별도 인터페이스 뒤의 교체 가능한 제안입니다.
+선택 업로드 완료 뒤 참조 `POST /content/projects`는 초기 `waiting_plan_approval` Creator task와 plan checkpoint를 만들고 응답 `task_id`로 조회할 수 있게 합니다. API 초안의 계약 상태는 여전히 승인 대기입니다. 참조 어댑터는 업로드 세션당 미디어 1개·part 1개만 받으므로 여러 선택 파일은 각각 별도 세션으로 올립니다. 동일 소유자·순서 있는 미디어 ID·프로젝트 설정으로 다시 요청하면 다른 멱등 키를 써도 기존 프로젝트와 task를 돌려줍니다. 여러 파일 한 세션·재개 chunk 계약은 승인 대기입니다.
+
+현재 manifest 규칙은 한 항목 배열을 UTF-8 compact JSON으로 직렬화하고, 키 순서를 `client_item_id`(소문자 UUID), `sha256`(소문자 hex), `size_bytes`로 고정한 뒤 SHA-256을 계산합니다. 이 규칙은 기존 동작을 명확히 적은 **제안/승인 대기**이며, 다중 항목 정렬 규칙은 정하지 않았습니다. 서버는 파일 signature와 컨테이너 구조·CRC/box 경계를 검사합니다. 전체 영상/이미지 codec decoding은 별도 도구가 없어 보장하지 않습니다.
 
 ## 공통 인증·소유권·권한 정책 — [제안/승인 대기]
 
@@ -178,6 +189,16 @@ Publishing uncertainty: publishing → outcome_unknown → reconciling
 - 전달서와 v0.2의 경로는 1:1로 구현하지 않습니다. 본 문서의 후보 계약에 매핑하고 `docs/RECONCILIATION-REPORT.md`에서 차이를 추적합니다.
 - 필드/응답 타입·multipart 업로드 규격·상태 기계·오류 코드·소유권 정책·버전 지정 방식은 **승인 및 OpenAPI 테스트 필요**.
 - 음성 원본 미보관을 기본값으로 하며 원본 보존 예외는 별도 동의가 필요합니다.
+
+## 플랫폼별 Creator 게시 정보 API — [구현됨, 계약 승인 대기]
+
+공통 렌더 결과를 YouTube Shorts, TikTok, Instagram Reels 각각의 게시 정보 레코드와 연결합니다. 경로는 `POST/GET /tasks/{task_id}/publications`, 단건 `GET/PATCH /tasks/{task_id}/publications/{publication_id}`, 독립 승인 `POST /tasks/{task_id}/publications/{publication_id}/approvals`입니다. 게시 정보에는 `platform`, `account_id`, `visibility`, `title`, `description`, `hashtags`가 있고, 서버가 `revision`과 `metadata_hash`를 관리합니다. 한 task·platform 조합당 하나만 허용합니다.
+
+모든 경로는 bearer 인증과 소유권 검사를 적용하고 비소유 응답은 `404 RESOURCE_NOT_FOUND`로 통일합니다. 변경 요청에는 `Idempotency-Key`가 필요하며 PATCH는 현재 `revision`과 일치해야 합니다. 게시 정보 변경은 해당 publication ID에 연결된 `final_publish` 승인만 무효화하고 새 revision을 발급합니다. 타 플랫폼 승인은 별도 publication ID에 묶여 유지됩니다.
+
+플랫폼 최종 승인은 현재 콘텐츠 버전/hash, 실제 렌더 MP4의 SHA-256, 게시 정보 revision/hash에 묶입니다. 현재 task의 preview 승인, 성공한 FFmpeg 렌더, `artifact_verified=true`, ffprobe 검증 결과가 모두 있어야 publication 상태를 `publish_ready`로 바꿉니다. 테스트 렌더와 중간 승인, 다른 publication 승인으로는 전이할 수 없습니다. 프로젝트 콘텐츠 새 버전이 생기면 구버전에 연결된 모든 플랫폼 승인을 무효화해야 합니다. SNS 호출이나 게시 endpoint는 이 범위에 포함하지 않습니다.
+
+공개범위 enum을 플랫폼 별 공식 API 값에 매핑하는 방법, 플랫폼별 제목/설명/해시태그 길이 제한, 계정 ID 연결/검증은 `[검증 필요]`입니다. 현재 공통값은 제안이며 게시 실행 허가가 아닙니다.
 
 ## 승인 필요 항목
 - 인증 방식·초기 사용자 등록/복구, 세션 수명, LAN HTTPS/Tailscale 경계.

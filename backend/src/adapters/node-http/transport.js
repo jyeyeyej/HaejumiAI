@@ -1,7 +1,7 @@
 const API_PREFIX = '/api/v1';
 const JSON_LIMIT = 1_048_576;
 
-export function createApiHandler({ repositories, auth, maxMediaBytes }) {
+export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoordinator = null }) {
   return async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
@@ -41,6 +41,89 @@ export function createApiHandler({ repositories, auth, maxMediaBytes }) {
         const body = await readJson(request);
         const result = repositories.createForOwner(principal.ownerId, body, request.headers['idempotency-key']);
         return sendJson(response, 201, result);
+      }
+
+      match = /^\/tasks\/([0-9a-f-]+)\/checkpoints$/.exec(path);
+      if (request.method === 'GET' && match) {
+        const checkpoints = repositories.getOwnedCheckpoints(principal.ownerId, match[1]);
+        if (!checkpoints) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendJson(response, 200, { items: checkpoints });
+      }
+
+      match = /^\/tasks\/([0-9a-f-]+)\/approvals$/.exec(path);
+      if (request.method === 'POST' && match) {
+        requireJson(request); requireIdempotencyKey(request);
+        const body = await readJson(request);
+        return sendJson(response, 201, repositories.approveCheckpoint(principal.ownerId, match[1], body, request.headers['idempotency-key']));
+      }
+
+      match = /^\/tasks\/([0-9a-f-]+)\/publications$/.exec(path);
+      if (match && request.method === 'POST') {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 201, repositories.createPublication(principal.ownerId, match[1], await readJson(request), request.headers['idempotency-key']));
+      }
+      if (match && request.method === 'GET') {
+        const items = repositories.listPublications(principal.ownerId, match[1]);
+        if (!items) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendJson(response, 200, { items });
+      }
+      match = /^\/tasks\/([0-9a-f-]+)\/publications\/([0-9a-f-]+)$/.exec(path);
+      if (match && request.method === 'GET') {
+        const item = repositories.getPublication(principal.ownerId, match[1], match[2]);
+        if (!item) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendJson(response, 200, item);
+      }
+      if (match && request.method === 'PATCH') {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 200, repositories.updatePublication(principal.ownerId, match[1], match[2], await readJson(request), request.headers['idempotency-key']));
+      }
+      match = /^\/tasks\/([0-9a-f-]+)\/publications\/([0-9a-f-]+)\/approvals$/.exec(path);
+      if (match && request.method === 'POST') {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 201, repositories.approvePublication(principal.ownerId, match[1], match[2], await readJson(request), request.headers['idempotency-key']));
+      }
+
+      match = /^\/tasks\/([0-9a-f-]+)\/render$/.exec(path);
+      if (request.method === 'POST' && match) {
+        if (!renderCoordinator) return sendError(response, 503, 'SERVICE_UNAVAILABLE');
+        requireJson(request); requireIdempotencyKey(request);
+        const body = await readJson(request);
+        const result = repositories.createRenderJob(principal.ownerId, match[1], body, request.headers['idempotency-key']);
+        if (result.created) renderCoordinator.enqueue(result.job.job_id);
+        return sendJson(response, 202, result.job);
+      }
+
+      match = /^\/jobs\/([0-9a-f-]+)$/.exec(path);
+      if (request.method === 'GET' && match) {
+        const job = repositories.getOwnedJob(principal.ownerId, match[1]);
+        if (!job) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendJson(response, 200, job);
+      }
+
+      match = /^\/jobs\/([0-9a-f-]+)\/cancel$/.exec(path);
+      if (request.method === 'POST' && match) {
+        if (!renderCoordinator) return sendError(response, 503, 'SERVICE_UNAVAILABLE');
+        requireIdempotencyKey(request);
+        return sendJson(response, 200, await renderCoordinator.cancel(principal.ownerId, match[1]));
+      }
+
+      match = /^\/tasks\/([0-9a-f-]+)\/preview$/.exec(path);
+      if (request.method === 'GET' && match) {
+        const version = Number(url.searchParams.get('content_version'));
+        if (!Number.isSafeInteger(version) || version < 1) return sendError(response, 422, 'VALIDATION_ERROR');
+        const preview = repositories.getOwnedPreview(principal.ownerId, match[1], version);
+        if (!preview) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        if (preview.mode === 'ffmpeg' && !preview.artifact_verified) return sendError(response, 409, 'RENDER_VALIDATION_FAILED');
+        response.writeHead(200, { 'Content-Type': preview.mode === 'test' ? 'application/x-haejumi-test-preview' : 'video/mp4',
+          'Content-Length': preview.bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Haejumi-Render-Mode': preview.mode });
+        return response.end(preview.bytes);
+      }
+
+      match = /^\/content\/projects\/([0-9a-f-]+)$/.exec(path);
+      if (request.method === 'GET' && match) {
+        const project = repositories.getOwnedProject(principal.ownerId, match[1]);
+        if (!project) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendJson(response, 200, project);
       }
 
       match = /^\/tasks\/([0-9a-f-]+)$/.exec(path);
@@ -113,7 +196,10 @@ const SAFE_MESSAGES = {
   RESOURCE_NOT_FOUND: '리소스를 찾을 수 없습니다.', VALIDATION_ERROR: '요청 형식을 확인해 주세요.',
   PAYLOAD_TOO_LARGE: '허용 크기를 초과했습니다.', UNSUPPORTED_MEDIA_TYPE: '허용되지 않은 미디어 형식입니다.',
   VERSION_CONFLICT: '요청한 파일 또는 버전이 일치하지 않습니다.', INVALID_STATE_TRANSITION: '현재 상태에서 처리할 수 없습니다.',
+  APPROVAL_SCOPE_MISMATCH: '이 체크포인트에 허용되지 않는 승인입니다.', RENDER_FAILED: '렌더 작업에 실패했습니다.',
+  RENDER_VALIDATION_FAILED: '렌더 결과 검증에 실패했습니다.', FFPROBE_UNAVAILABLE: 'ffprobe 검증 도구를 사용할 수 없습니다.',
   IDEMPOTENCY_CONFLICT: '멱등 키가 다른 요청에 사용되었습니다.', CONSENT_REQUIRED: '외부 처리 동의가 없습니다.',
+  PUBLICATION_ALREADY_EXISTS: '해당 플랫폼 게시 정보가 이미 있습니다.', RENDER_REQUIRED: '실제 FFmpeg 및 ffprobe 검증이 완료된 영상이 필요합니다.',
   SERVICE_UNAVAILABLE: '요청을 처리할 수 없습니다.',
 };
 

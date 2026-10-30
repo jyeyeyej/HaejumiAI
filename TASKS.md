@@ -118,6 +118,30 @@ Mock vs 실제 서비스:
 - OpenAPI 3.1 정식 validator를 사용할 수 없어 미검증 상태입니다. `docs/OPENAPI-VALIDATION.md`와 `docs/IMPLEMENTATION-STATUS.md`를 참조하세요.
 - 실제 개발 PC의 패키지·Android/FFmpeg·네트워크·배포 점검은 하지 않았습니다. SNS 게시·외부 개인정보 전송·유료 LLM 호출은 0회입니다.
 
+## Creator 업로드 안전성 보강 기록
+
+- 지원 이미지/영상 컨테이너 구조·확장자·signature·크기·해시와 저장 경로 검증을 보강했습니다. 전체 codec decoding은 도구 미설치로 보장하지 않습니다.
+- 업로드 완료와 프로젝트 생성의 owner 범위 중복을 제거하고 프로젝트 조회 소유권 검사를 추가했습니다.
+- `.env` allowlist loader와 미디어·경로·실패 사례 테스트를 추가했습니다. 위 P1 체크박스는 전체 범위 증거가 아니므로 완료 처리하지 않았습니다.
+- 업로드/기본 Creator 회귀 테스트 유지. 최신 전체 테스트 결과는 아래 렌더 API 기록을 참조합니다.
+
+## Creator 영상 규격·렌더러 구현 기록
+
+- D119에 사용자 확정 출력 규격(9:16 1080×1920, MP4 H.264/AAC, 30fps, 3~59초, 기본 30초, 로컬 FFmpeg 후 ffprobe)을 추가했습니다.
+- 로컬 렌더 명령 생성기, fit_pad/fill_crop 프레이밍, ffprobe 검증기에 프로젝트 승인 체크포인트·렌더 job·취소·상태·인증 미리보기 API를 연결했습니다. OpenAPI 초안은 계속 계약 승인 대기입니다.
+- plan과 draft 각각의 `continue` 승인이 있어야 렌더할 수 있으며, 테스트 renderer 결과는 `simulated`와 테스트 전용 media type으로 표시됩니다.
+- 최신 `npm test`: 19 passed, 실패 0. JavaScript 문법 검사 통과.
+- 실제 FFmpeg/ffprobe가 이 PC에서 발견되지 않아 렌더 파일 생성과 실 ffprobe 검증은 미실행입니다. T-107 완료 처리하지 않았습니다. 오디오 출력은 AAC 규격의 무음 트랙이며 원음/BGM 믹싱은 후속 작업입니다.
+- Android Studio·Docker 등 도구 설치는 하지 않았습니다. 실제 SNS 게시·외부 LLM 호출·개인정보 외부 전송은 0회입니다.
+
+## 플랫폼별 게시 정보·독립 최종 승인 구현 기록
+
+- 게시 정보 생성·목록/단건 조회·수정 API를 추가했습니다. 하나의 task에 플랫폼별 한 레코드(YouTube/TikTok/Instagram)를 보관하며 account ID, 공개범위, 제목, 설명, 해시태그를 독립 관리합니다.
+- 쓰기 요청은 인증·소유권·멱등 키 확인을 거칩니다. PATCH는 현재 revision을 요구하고 내용 변경 시 버전을 올려 해당 게시 정보에 묶인 승인만 무효화합니다. 오래된 영상 버전 승인도 조회 시 무효화됩니다.
+- 플랫폼별 별도 최종 승인 API는 현재 미리보기 중간 승인, 현재 영상 버전/hash, 성공한 실제 FFmpeg 렌더, ffprobe 검증, artifact SHA-256과 해당 게시 정보 revision/hash를 요구합니다. 테스트 렌더는 `RENDER_REQUIRED`로 막습니다. 최종 승인 상태는 `publish_ready`이며 SNS API/게시 실행은 구현하지 않았습니다.
+- 자동 테스트: 플랫폼별 레코드 생성·조회, 중복 방지, 타인 접근 차단, 테스트 렌더 최종승인 거부, 수정 후 해당 승인만 무효화, 다른 플랫폼 승인은 유지. `npm test`: 20 passed, 실패 0.
+- 실제 FFmpeg/ffprobe 성공 경로와 실제 영상 기반 승인 전이는 이 PC에 도구가 없어 미검증입니다. 정식 OpenAPI validator도 미설치 상태라 OAS 3.1 형식 검증 미실행입니다. SNS 연동·게시, 외부 LLM/개인정보 전송은 0회입니다.
+
 
 ## v1.1 정렬 관련
 - 최신 정리: `docs/RECONCILIATION-REPORT.md`, 승인 대기 API 계약: `docs/09-API-CONTRACT.md`, 구체 실행: `DEVELOPMENT-PLAN.md`.

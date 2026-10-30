@@ -10,18 +10,33 @@ configured bearer token and owner ID. Runtime media and state are stored under t
 ignored local data directory. No external network client, LLM, SNS publisher, or
 analytics integration is included.
 
-The `.env.example` file is a template and is not loaded automatically. Set the values
-in the shell or an approved local secret mechanism. Do not commit a populated `.env`.
+The server reads the repository-root `.env` at startup using a small allowlisted
+parser. It does not evaluate shell expressions, does not print values, and existing
+process environment variables take precedence. Do not commit a populated `.env`.
 
-For a local PowerShell session, create a temporary secret and start the server with:
+Copy `.env.example` to `.env`, set a random bearer token and owner ID, then run:
 
 ```powershell
-$env:HAEJUMI_BEARER_TOKEN = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-$env:HAEJUMI_OWNER_ID = "local-owner"
 npm start
 ```
 
-The token is ephemeral for that shell session. This single-owner development bearer
-mechanism is not the approved production authentication design.
+The parser permits only the six `HAEJUMI_*` settings used by this backend. The server
+still binds to `127.0.0.1`; this single-owner development bearer mechanism is not the
+approved production authentication design.
 
-See `backend/src/ports` and `backend/src/application` for replaceable boundaries.
+See `backend/src/ports`, `backend/src/security`, and `backend/src/adapters` for replaceable boundaries.
+
+## Creator local render adapter
+
+`POST /api/v1/tasks/{task_id}/render` creates a private, idempotent render job only
+after the current plan and draft `continue` checkpoints are approved. Poll
+`GET /api/v1/jobs/{job_id}`, cancel with `POST /api/v1/jobs/{job_id}/cancel`, and fetch
+the authenticated current-version preview from `GET /api/v1/tasks/{task_id}/preview`.
+The job uses only media already attached to the owner's project. Real previews are
+served only after ffprobe verifies the confirmed 9:16 1080×1920, 30fps H.264/AAC MP4
+profile and 3–59 second duration. The test renderer returns `simulated` and a marker
+body that is not a video. The current render draft explicitly has no captions and a
+silent AAC track; caption burn-in and original audio/BGM mixing remain future work.
+
+For a real local render, install FFmpeg separately on the supported development PC
+and place both `ffmpeg` and `ffprobe` on PATH; this repository does not install them.

@@ -11,6 +11,15 @@
 |---|---|---|
 | AUTH-01 | `/auth/session` 외 보호 경로에 토큰 없이 호출 | `401 AUTHENTICATION_REQUIRED`; 리소스/작업 변화 없음 |
 | AUTH-02 | 사용자 A가 사용자 B의 media/project/task/checkpoint/consent/approval/publish/draft ID 참조 | `404 RESOURCE_NOT_FOUND`; 데이터 유출·변경 없음 |
+| PUBMETA-01 | 한 task에서 YouTube/TikTok/Instagram 게시 정보 각각 생성·조회 | 플랫폼별 독립 레코드와 요청 필드 유지; 플랫폼 API 호출 0회 |
+| PUBMETA-02 | 동일 task/platform 게시 정보 중복 생성 | `409 PUBLICATION_ALREADY_EXISTS`; 기존 정보 유지 |
+| PUBMETA-03 | 타인 task/게시 레코드 조회·수정 | `404 RESOURCE_NOT_FOUND`; 정보 노출·변경 없음 |
+| PUBMETA-04 | 수정된 revision이 오래된 PATCH에 사용됨 | `409 VERSION_CONFLICT`; 새 값 보존 |
+| PUBMETA-05 | 게시 정보 수정 후 해당 플랫폼 기존 final approval | revision 증가, 해당 승인 invalidated, status draft |
+| PUBMETA-06 | YouTube 정보 수정 후 TikTok 승인 | YouTube 승인만 무효화; TikTok 승인은 독립적으로 유지 |
+| PUBMETA-07 | 테스트 렌더 artifact로 플랫폼 최종 승인 | `409 RENDER_REQUIRED`; publish_ready 전환 없음 |
+| PUBMETA-08 | 실제 ffmpeg+ffprobe+현재 preview 승인 없는 final approval | `409 RENDER_REQUIRED`; 승인과 외부 호출 모두 0 |
+| PUBMETA-09 | 중간 승인/다른 플랫폼 승인 ID를 플랫폼 final approval에 재사용 | 거부; 플랫폼/콘텐츠/계정/공개범위/문구 간 권한 전이 없음 |
 | AUTH-03 | request body에 위조 `user_id` 포함 | 소유권은 인증 주체로만 계산; 위조 ID 무시 또는 `422 VALIDATION_ERROR` |
 | AUTH-04 | Creator가 Diary/Wellness scope를 요청 | `403 FORBIDDEN`; 민감 데이터 조회 0회 |
 | AUTH-05 | Diary가 요청 날짜 외 source 또는 허용되지 않은 source ID 참조 | `404 RESOURCE_NOT_FOUND`; 원문 접근 0회 |
@@ -19,15 +28,36 @@
 
 | ID | 상황 | 기대 결과 |
 |---|---|---|
-| UP-01 | 선택한 미디어를 업로드하고 manifest 완료 | 실제 MIME/크기/각 파일 SHA-256/manifest 일치; 업로드 완료 제안은 user+manifest당 최대 1회 |
+| UP-01 | 지원 미디어의 선택 업로드와 manifest 완료 | signature·확장자·container 구조/CRC·크기·SHA-256 일치; owner+manifest의 import/proposal 최대 1회 |
 | UP-02 | path traversal, 미등록 파일 경로 또는 비선택 미디어를 참조 | `422 VALIDATION_ERROR` 또는 `404 RESOURCE_NOT_FOUND`; 서버 파일 탐색/비선택 파일 읽기 0회 |
 | UP-03 | 선언은 JPEG지만 실제 파일이 금지 형식 | `415 UNSUPPORTED_MEDIA_TYPE`; 격리 및 downstream 사용 금지 |
 | UP-04 | 크기 제한 초과 | `413 PAYLOAD_TOO_LARGE`; 완료 상태/프로젝트 연결 없음 |
 | UP-05 | 같은 조각·같은 멱등 키·같은 body 재전송 | 기존 결과 반환; 중복 저장 0회 |
 | UP-06 | 같은 멱등 키를 다른 body로 재사용 | `409 IDEMPOTENCY_CONFLICT`; 두 번째 요청 미실행 |
-| UP-07 | 프로젝트 생성 후 반환된 `task_id` 조회 | 소유자에게 `GET /tasks/{task_id}`가 `created` 반환; 다른 소유자는 `404` |
-| UP-08 | 참조 어댑터에 세션당 여러 파일 또는 part 2 이상 요청 | 안전하게 거부; 다중 항목·재개 계약 승인 전 확장 금지 |
-| HASH-01 | 업로드 파일 바이트가 선언 SHA-256과 다름 | `409 VERSION_CONFLICT`; 파일은 사용 가능 상태가 되지 않음 |
+| UP-07 | 프로젝트 생성 후 반환된 `task_id` 조회 | 소유자에게 `GET /tasks/{task_id}`가 `waiting_plan_approval` 반환; 다른 소유자는 `404` |
+| UP-08 | 세션에 여러 파일 선언 | `422 VALIDATION_ERROR`; 각 파일을 별도 session으로 전송 |
+| UP-09 | part 2 이상 요청 | `409 INVALID_STATE_TRANSITION`; 승인 전 단일 part 제한 |
+| UP-10 | 실제 signature와 선언 MIME 또는 파일 확장자가 다름 | `415 UNSUPPORTED_MEDIA_TYPE`; 파일 저장·import 없음 |
+| UP-11 | PNG CRC, JPEG marker segment, WebP RIFF length, MP4 box 경계가 손상됨 | `422 VALIDATION_ERROR`; media import 없음 |
+| UP-12 | 같은 소유자·manifest로 upload complete 재시도 | 기존 `import_id`, `media_id`, `proposal_id`; 새 media/proposal 0건 |
+| UP-13 | 같은 미디어/설정으로 새 project idempotency key 사용 | 기존 `project_id`와 `task_id`; 추가 project/task 0건 |
+| UP-14 | 다른 소유자가 `GET /content/projects/{project_id}` | `404 RESOURCE_NOT_FOUND`; 프로젝트 필드 0개 노출 |
+| UP-15 | `.env`, data, 개인 사진/영상, 로컬 백업 추적 여부 | `.env`/data ignored 및 untracked; tracked sensitive media/key 0개 |
+| RENDER-01 | 프로젝트 길이 3초 또는 59초로 생성 | `201`; 기본 길이는 30초 |
+| RENDER-02 | 프로젝트 길이를 2초, 60초 또는 비정수로 요청 | `422 VALIDATION_ERROR`; 프로젝트 미생성 |
+| RENDER-03 | fit_pad로 세로 출력 | 원본 전체 보존, 1080×1920 / 30fps / H.264 / AAC MP4 |
+| RENDER-04 | fill_crop와 초점 좌표 제공 | 0~1 범위 좌표를 crop focal point로 적용; 범위 초과는 `422` |
+| RENDER-05 | ffprobe 누락·형식·해상도·길이·코덱·fps 불일치 | 렌더는 실패 처리되며 미검증 파일을 ready로 노출하지 않음 |
+| RENDER-06 | plan 또는 draft 중간 승인 없이 render 요청 | `409 INVALID_STATE_TRANSITION`; 렌더러 호출 0회 |
+| RENDER-07 | plan 승인 후 draft 승인 없이 render 요청 | `409 INVALID_STATE_TRANSITION`; plan 승인만으로 렌더 불가 |
+| RENDER-08 | 게시/일기 final scope를 plan/draft에 사용 | `409 APPROVAL_SCOPE_MISMATCH`; 단계 변경 없음 |
+| RENDER-09 | 타인 project/task/job/preview 접근 | `404 RESOURCE_NOT_FOUND`; 파일 bytes 0개 노출 |
+| RENDER-10 | render 같은 key 또는 다른 key로 중복 요청 | 진행/완료 job ID 재사용; 두 번째 renderer 호출 0회 |
+| RENDER-11 | test renderer 완료 | Job `simulated`, `artifact_verified=false`; 테스트 전용 미리보기이며 실제 MP4 아님 |
+| RENDER-12 | FFmpeg 오류·ffprobe 실패 | Job `failed`와 안전한 오류 코드; preview 없음; 내부 경로/stderr 미노출 |
+| RENDER-13 | 실행 중 cancel | owner만 취소 가능; Job `cancelled`; 결과 preview 제공 안 함 |
+| RENDER-14 | 업로드 완료 후 저장된 media bytes가 바뀜 | 렌더 renderer 호출 0회; Job `failed`/`VERSION_CONFLICT`; preview 없음 |
+| HASH-01 | 업로드 파일 바이트가 선언 SHA-256과 다름 | `409 VERSION_CONFLICT`; 임시 파일 정리, media는 사용 가능 상태가 되지 않음 |
 | HASH-02 | 컷 순서·자막·음악/license 참조·render 설정 수정 | 새 `content_version`, 새 `content_hash`; 해당 task의 과거 모든 approval은 `invalidated` |
 | HASH-03 | 수정 후 예전 편집으로 되돌림 | 과거 approval 재활성화 없음; 현재 버전 재승인 필요 |
 | HASH-04 | 자막/렌더 결과 artifact 바이트가 승인 후 변경 | `artifact_sha256` 불일치로 `409 STALE_APPROVAL`; publish 호출 0회 |
@@ -54,7 +84,7 @@
 | ID | 상황 | 기대 결과 |
 |---|---|---|
 | APR-01 | plan/draft/preview checkpoint + `continue` | 승인 기록 생성; 다음 단계만 진행; 게시·저장·외부전송 권한은 없음 |
-| APR-02 | final_publish checkpoint + `final_publish` + 최신 version/hash/artifact hash/target | 최종 게시 승인 기록 생성 |
+| APR-02 | publication별 final approval + 최신 version/hash/artifact hash/publication revision/hash | 특정 플랫폼에 한정된 최종 승인 생성; 게시 API 호출 없음 |
 | APR-03 | final_diary checkpoint + `final_diary` + 현재 draft version/hash | 일기 최종 승인 기록 생성 |
 | APR-04 | plan/draft/preview와 final scope 조합 또는 final checkpoint에 continue | `409 APPROVAL_SCOPE_MISMATCH`; 승인/상태 변화 없음 |
 | APR-05 | STT 전사문을 사용자 확인 없이 명령으로 전달 | transcript는 승인 증거가 아님; 최종 action 불가 |
