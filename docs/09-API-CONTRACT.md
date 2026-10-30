@@ -14,7 +14,7 @@
 
 ## 통일 API 후보 계약 v0.5 — [제안/승인 대기]
 
-> **아직 사용자 승인이 없는 API 설계안입니다.** 아래 경로는 오직 하나의 `/api/v1` 접두사를 사용합니다. 이전 전달서의 `/api/projects` 형태 및 과거 `/content/projects` 예시는 역사 기록(archive)에 보관하고 이 문서에서는 실행 기준에서 제외합니다. 실제 OpenAPI/Pydantic 확정 전엔 계약 변경 금지.
+> **아직 사용자 승인이 없는 API 설계안입니다.** 아래 경로는 오직 하나의 `/api/v1` 접두사를 사용합니다. 이전 전달서의 `/api/projects` 형태 및 과거 `/content/projects` 예시는 역사 기록(archive)에 보관하고 이 문서에서는 실행 기준에서 제외합니다. 실제 OpenAPI 및 backend validation adapter 확정 전엔 계약 변경 금지.
 
 | Method | `/api/v1` 이후 경로 | 목적 | 필수 통제 |
 |---|---|---|---|
@@ -50,6 +50,9 @@
 - 외부 LLM/STT/비전 처리는 `external_processing` 동의와 별도 처리 요청을 요구합니다. 사용자 메시지나 게시 승인만으로 동의를 추정하지 않습니다. 동의 부재·철회·범위 불일치·정책 검사 실패는 fail closed로 거부합니다.
 - API는 호출자의 `user_id`를 신뢰하지 않습니다. 소유자는 인증 주체에서 결정하고 모든 참조 ID를 소유권 검사합니다.
 - 모든 변경 요청은 멱등 키 적용 대상으로 제안합니다. 키의 보존 기간·scope·충돌 규칙은 아직 승인되지 않았습니다.
+
+### 최소 Creator 준비 슬라이스 — [제안/승인 대기]
+선택 업로드 완료 뒤 `POST /content/projects`가 초기 `created` 상태의 Creator task를 만들고 응답 `task_id`로 `GET /tasks/{task_id}` 조회를 가능하게 하는 응답 확장을 제안합니다. OpenAPI `ContentProject.task_id`는 이를 위한 추가 필드이며 승인 전 계약 확정으로 간주하지 않습니다. 참조 어댑터는 업로드 세션당 미디어 1개·part 1개만 받습니다. 여러 항목/재개 chunk 계약과 manifest canonicalization은 승인 전까지 별도 인터페이스 뒤의 교체 가능한 제안입니다.
 
 ## 공통 인증·소유권·권한 정책 — [제안/승인 대기]
 

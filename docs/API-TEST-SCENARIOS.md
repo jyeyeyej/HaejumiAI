@@ -1,6 +1,6 @@
 # `/api/v1` API 계약·보안 테스트 시나리오
 
-> 상태: OpenAPI v0.5의 수용 기준 제안 **[승인 대기]**. 테스트 코드/실행 결과가 아닙니다.  
+> 상태: OpenAPI v0.5 수용 기준 **[승인 대기]**. 일부 보안·Creator 기본 흐름은 `backend/tests`에서 실행되며, 전체 시나리오의 테스트 구현/실행을 뜻하지 않습니다.
 > 계약 원본: [`openapi-v1.yaml`](openapi-v1.yaml) · 정책: [`09-API-CONTRACT.md`](09-API-CONTRACT.md) · 설명: [`API-GUIDE.md`](API-GUIDE.md)
 
 모든 테스트는 가짜 미디어·계정과 mock 외부 서비스로 시작합니다. 실제 SNS 게시나 개인정보 외부 전송은 하지 않습니다. 모든 행의 응답은 `error.code`와 HTTP를 함께 검증하고, 상태 변경 및 외부 HTTP 호출 수를 확인합니다.
@@ -25,7 +25,9 @@
 | UP-04 | 크기 제한 초과 | `413 PAYLOAD_TOO_LARGE`; 완료 상태/프로젝트 연결 없음 |
 | UP-05 | 같은 조각·같은 멱등 키·같은 body 재전송 | 기존 결과 반환; 중복 저장 0회 |
 | UP-06 | 같은 멱등 키를 다른 body로 재사용 | `409 IDEMPOTENCY_CONFLICT`; 두 번째 요청 미실행 |
-| HASH-01 | 업로드 파일 바이트가 선언 SHA-256과 다름 | `422 VALIDATION_ERROR`; 파일은 사용 가능 상태가 되지 않음 |
+| UP-07 | 프로젝트 생성 후 반환된 `task_id` 조회 | 소유자에게 `GET /tasks/{task_id}`가 `created` 반환; 다른 소유자는 `404` |
+| UP-08 | 참조 어댑터에 세션당 여러 파일 또는 part 2 이상 요청 | 안전하게 거부; 다중 항목·재개 계약 승인 전 확장 금지 |
+| HASH-01 | 업로드 파일 바이트가 선언 SHA-256과 다름 | `409 VERSION_CONFLICT`; 파일은 사용 가능 상태가 되지 않음 |
 | HASH-02 | 컷 순서·자막·음악/license 참조·render 설정 수정 | 새 `content_version`, 새 `content_hash`; 해당 task의 과거 모든 approval은 `invalidated` |
 | HASH-03 | 수정 후 예전 편집으로 되돌림 | 과거 approval 재활성화 없음; 현재 버전 재승인 필요 |
 | HASH-04 | 자막/렌더 결과 artifact 바이트가 승인 후 변경 | `artifact_sha256` 불일치로 `409 STALE_APPROVAL`; publish 호출 0회 |

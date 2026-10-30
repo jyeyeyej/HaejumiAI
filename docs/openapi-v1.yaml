@@ -6,6 +6,13 @@ info:
     제안/승인 대기 중인 계약 초안입니다. Creator 우선이며 개인정보 외부 전송과
     SNS/외부 발행은 서버측 동의·권리·버전 승인 검증 없이는 실행할 수 없습니다.
   x-contract-status: proposal-pending-user-approval
+  x-validation-status: unverified-no-local-openapi-validator
+  x-implementation-slice:
+    status: proposed-pending-contract-approval
+    notes:
+      - Project creation creates an initial Creator task and returns task_id for polling.
+      - The reference adapter accepts one selected media item and one body part per upload session.
+      - Manifest canonicalization and chunk addressing remain approval items.
 servers:
   - url: /api/v1
     description: Base path proposal; deployment origin and TLS remain undecided.
@@ -313,7 +320,9 @@ paths:
       description: >-
         Server accepts only declared upload parts. It must not enumerate or read
         other device/gallery files. Actual content type, size, digest and ownership
-        are validated server-side. Chunking strategy is provisional.
+        are validated server-side. The current replaceable reference adapter accepts
+        one selected item per session and one complete body at part_number=1. Multi-item
+        sessions and resumable chunk semantics remain proposals pending approval.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -404,6 +413,10 @@ paths:
       tags: [Projects]
       operationId: createContentProject
       summary: Create a Creator project from owned uploaded media
+      description: >-
+        This proposed initial slice also creates an idle Creator task and returns its
+        task_id so the client can poll GET /tasks/{task_id}. This additive response
+        field is pending API contract approval.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -1111,9 +1124,10 @@ components:
     ContentProject:
       type: object
       additionalProperties: false
-      required: [project_id, status, current_version, media_ids]
+      required: [project_id, task_id, status, current_version, media_ids]
       properties:
         project_id: { type: string, format: uuid }
+        task_id: { type: string, format: uuid, description: Proposed initial task created with this project; approval pending. }
         status: { type: string, enum: [created, planning, review_required, rendering, ready, blocked, failed] }
         current_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }

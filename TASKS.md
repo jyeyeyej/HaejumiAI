@@ -110,6 +110,14 @@ Mock vs 실제 서비스:
 다음 작업:
 ```
 
+## 2026-10-30 참조 구현 준비 기록
+
+- `backend/`, `android/`, `agents/`, `tests/`, `docs/` 확장 경계를 생성했습니다. Android 실제 프로젝트는 기술 결정이 대기 중이어서 안내 파일만 두었습니다.
+- 교체 가능한 Node 표준 라이브러리 참조 adapter로 인증, 소유권, 선택 미디어 업로드·완료 검증, Creator 프로젝트 및 작업 상태 조회, 외부 전송 fail-closed 경계를 작성했습니다.
+- `npm test`: 7 passed. 이는 P1 전체 완료가 아니며 위 TASK 체크박스는 완료 처리하지 않습니다.
+- OpenAPI 3.1 정식 validator를 사용할 수 없어 미검증 상태입니다. `docs/OPENAPI-VALIDATION.md`와 `docs/IMPLEMENTATION-STATUS.md`를 참조하세요.
+- 실제 개발 PC의 패키지·Android/FFmpeg·네트워크·배포 점검은 하지 않았습니다. SNS 게시·외부 개인정보 전송·유료 LLM 호출은 0회입니다.
+
 
 ## v1.1 정렬 관련
 - 최신 정리: `docs/RECONCILIATION-REPORT.md`, 승인 대기 API 계약: `docs/09-API-CONTRACT.md`, 구체 실행: `DEVELOPMENT-PLAN.md`.

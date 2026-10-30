@@ -20,8 +20,9 @@ export function createApiHandler({ repositories, auth, maxMediaBytes }) {
       let match = /^\/media\/uploads\/([0-9a-f-]+)\/parts\/(\d+)$/.exec(path);
       if (request.method === 'PUT' && match) {
         if (request.headers['content-type'] !== 'application/octet-stream') return sendError(response, 415, 'UNSUPPORTED_MEDIA_TYPE');
+        requireIdempotencyKey(request);
         const bytes = await readBytes(request, maxMediaBytes);
-        repositories.putUploadPart(principal.ownerId, match[1], Number(match[2]), bytes);
+        repositories.putUploadPart(principal.ownerId, match[1], Number(match[2]), bytes, request.headers['idempotency-key']);
         response.writeHead(204, { 'Cache-Control': 'no-store' });
         return response.end();
       }
@@ -29,14 +30,16 @@ export function createApiHandler({ repositories, auth, maxMediaBytes }) {
       match = /^\/media\/uploads\/([0-9a-f-]+)\/complete$/.exec(path);
       if (request.method === 'POST' && match) {
         requireJson(request);
+        requireIdempotencyKey(request);
         const body = await readJson(request);
-        return sendJson(response, 200, repositories.completeUpload(principal.ownerId, match[1], body));
+        return sendJson(response, 200, repositories.completeUpload(principal.ownerId, match[1], body, request.headers['idempotency-key']));
       }
 
       if (request.method === 'POST' && path === '/content/projects') {
         requireJson(request);
+        requireIdempotencyKey(request);
         const body = await readJson(request);
-        const result = repositories.createForOwner(principal.ownerId, body.media_ids, request.headers['idempotency-key']);
+        const result = repositories.createForOwner(principal.ownerId, body, request.headers['idempotency-key']);
         return sendJson(response, 201, result);
       }
 
@@ -75,6 +78,16 @@ function requireJson(request) {
     const error = new Error('JSON content type required');
     error.status = 415;
     error.code = 'UNSUPPORTED_MEDIA_TYPE';
+    throw error;
+  }
+}
+
+function requireIdempotencyKey(request) {
+  const key = request.headers['idempotency-key'];
+  if (typeof key !== 'string' || key.length < 16 || key.length > 200) {
+    const error = new Error('Idempotency-Key required');
+    error.status = 422;
+    error.code = 'VALIDATION_ERROR';
     throw error;
   }
 }
