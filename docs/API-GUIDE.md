@@ -22,7 +22,7 @@ API는 Android 앱이 PC 서버에 “선택한 파일을 올려 주세요”, �
 
 외부 LLM·STT·비전·분석 서비스로 나가는 모든 요청은 API 경로나 Agent에 관계없이 Backend의 공통 PrivacyGate/LLMGateway를 거쳐야 합니다. 서버는 제공자 허용 목록, 목적, 데이터 종류, 소유권, 최소 전송 범위, 현재 동의 상태를 요청을 받을 때와 실제 네트워크 전송 직전에 확인합니다.
 
-동의가 없거나, 철회·만료됐거나, 전송 범위가 동의와 다르거나 검사를 완료할 수 없으면 서버는 `403 CONSENT_REQUIRED` 또는 `403 PRIVACY_POLICY_DENIED`로 막고 외부 요청을 **0회** 발생시켜야 합니다. 재시도와 백그라운드 작업에도 같은 규칙이 적용됩니다. 사용자의 문장, STT 전사문, 중간 승인 또는 게시 승인은 외부 전송 동의가 아닙니다.
+동의가 없거나, 철회·만료됐거나, 전송 범위가 동의와 다르거나 검사를 완료할 수 없으면 PrivacyGate가 provider dispatch를 거부해 외부 요청을 **0회** 발생시킵니다. Creator plan API는 안전한 local-rules fallback 결과를 반환하고 `generation.gate_reason`에 사유를 담습니다. 현재 동기식 plan 흐름에는 대기 중 provider job이 없습니다. 사용자의 문장, STT 전사문, 중간 승인 또는 게시 승인은 외부 전송 동의가 아닙니다.
 
 ## Creator 사진·영상 제작 흐름
 
@@ -43,7 +43,11 @@ API는 Android 앱이 PC 서버에 “선택한 파일을 올려 주세요”, �
 
 Creator의 `POST /tasks/{task_id}/plan`은 그 프로젝트에 연결된 선택 미디어만 사용해 구조화된 쇼츠 장면 기획과 자막 초안을 만듭니다. 기획은 콘텐츠 버전/hash와 `plan` 중간 승인 checkpoint에 저장됩니다. `GET /tasks/{task_id}/plan`으로 현재 기획을 읽을 수 있습니다. 자막은 기획 승인 뒤 `GET /tasks/{task_id}/draft`에서 표시되며, 별도 `draft` 승인 전에 렌더할 수 없습니다. 기획을 수정하면 새 콘텐츠 버전이 되고 이전 승인은 모두 무효화됩니다.
 
-외부 LLM은 기본 비활성화이며 현재 서버에는 OpenAI 연결이 없습니다. 기본 생성은 로컬 규칙 fallback이며 테스트만 Fake LLM을 사용합니다. 향후 공급자 호출도 단일 LLM Gateway를 거쳐야 하며, 서버 측 명시 동의 검증이 없는 PrivacyGate는 외부 요청을 0회로 차단합니다. 초기 한도는 설정 가능한 제안값으로 일 `$0.20`, 월 `$5`, 작업당 5회입니다. 예산 예약은 로컬 state에 기록하며 timeout은 중복 과금을 막기 위해 자동 재호출하지 않습니다.
+외부 처리를 요청하려면 먼저 `GET /privacy/processing-notice?provider_id=openai&purpose=vision_analysis`의 제공자·목적·전송 범위·보존 고지를 사용자에게 보여 주세요. 사용자가 확인한 경우에만 그 고지 ID/버전, 목적 `vision_analysis`, `selected_media`·`user_text` 범위와 정확한 업로드 미디어 `resource_ids`를 담아 `POST /privacy/consents`를 호출합니다. 동의 저장은 그 자체로 OpenAI를 호출하지 않습니다. Creator 요청에 반환된 `consent_id`를 `POST /assistant/messages` 또는 `/tasks/{task_id}/plan`의 `privacy_consent_id`로 전달해야 하며, 동의된 resource ID와 요청 프로젝트의 미디어 ID가 정확히 일치해야 합니다. 철회는 `DELETE /privacy/consents/{consent_id}`입니다.
+
+실제 OpenAI 처리는 다음 조건이 모두 있을 때만 가능합니다: `HAEJUMI_LLM_ENABLED=true`, `.env`의 `HAEJUMI_OPENAI_API_KEY`와 모델 설정, 유효한 소유자 동의, Gateway 예산 허용, PrivacyGate의 마지막 권한 검사. 기본값은 비활성입니다. 서버는 사진을 로컬에서 축소하고 메타데이터를 제거하며, 선택 영상은 로컬 FFmpeg에서 프레임 하나를 뽑습니다. 최대 5개의 준비된 이미지만 OpenAI Responses API 입력에 포함하고 출력은 2,500 token 상한을 적용합니다. 파일 원본이나 갤러리 전체, 일기·건강 기록은 보내지 않습니다. `store=false`도 제공자 보존에 관한 보증은 아니므로 고지에 있는 제공자 정책을 확인해야 합니다. OpenAI 출력은 schema 검증 후 Creator 기획/자막 초안으로 저장되고, 사용자 기획 승인은 계속 필요합니다.
+
+현재 외부 호출 기본 비활성화이며 이번 테스트에서는 Mock/가짜 `fetch`만 사용합니다. 초기 한도는 설정 가능한 제안값으로 일 `$0.20`, 월 `$5`, 작업당 5회입니다. 준비 미디어당 예상비용은 보수 예약 설정값이지 청구액 보증이 아닙니다. 예산 예약은 로컬 state에 기록하고 timeout이나 애매한 결과는 자동 재호출하지 않습니다.
 
 ## 승인 종류는 서로 바꿔 쓸 수 없습니다
 

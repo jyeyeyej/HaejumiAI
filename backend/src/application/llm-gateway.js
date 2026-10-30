@@ -18,7 +18,7 @@ export class LLMGateway {
     if (state) state.data.llmBudget = this.usage;
   }
 
-  async generate({ taskId, revision = false, dataCategories = ['user_text'], resourceIds = [], prompt, input }) {
+  async generate({ ownerId = null, taskId, revision = false, consentId = null, purpose = 'llm_text', dataCategories = ['user_text'], resourceIds = [], prompt, input }) {
     if (!this.enabled) return { available: false, reason: 'llm_disabled', usage: emptyUsage() };
     if (!this.provider) return { available: false, reason: 'provider_unavailable', usage: emptyUsage() };
     if (typeof prompt !== 'string' || !taskId) return { available: false, reason: 'invalid_context', usage: emptyUsage() };
@@ -44,7 +44,7 @@ export class LLMGateway {
     try {
       const response = this.provider.mode === 'mock' && this.allowMockProvider
         ? await (async () => { reserve(); return this.provider.generateStructured({ prompt, input }); })()
-        : await this.privacyGate.dispatchExternal({ taskId, resourceIds, purpose: 'llm_text', providerId: this.provider.providerId,
+        : await this.privacyGate.dispatchExternal({ ownerId, taskId, consentId, resourceIds, purpose, providerId: this.provider.providerId,
           dataCategories, estimatedCostUsd: estimate }, async () => { reserve(); return this.provider.generateStructured({ prompt, input }); });
       if (!response || typeof response !== 'object' || Array.isArray(response)) return { available: false, reason: 'INVALID_MODEL_OUTPUT', usage: emptyUsage() };
       return { available: true, output: response, reason: null, usage: { estimated_cost_usd: estimate, calls_for_task: calls + 1, revisions_for_task: revisions + Number(revision) } };

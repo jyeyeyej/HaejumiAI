@@ -1,6 +1,6 @@
 /**
- * Fail-closed boundary for any future external processor. No external dispatch
- * implementation is wired into this initial slice.
+ * Fail-closed boundary for every external processor. Provider clients are invoked
+ * only inside dispatchExternal after the current owner-scoped consent is verified.
  */
 export class PrivacyGate {
   constructor({ enabled = false, providerAllowlist = [], consentVerifier = async () => false } = {}) {

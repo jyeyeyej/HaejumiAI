@@ -14,6 +14,9 @@ import { SupervisorRouter } from '../../agents/supervisor-router.js';
 import { CreatorAgent } from '../../agents/creator-agent.js';
 import { LLMGateway } from '../../application/llm-gateway.js';
 import { PrivacyGate } from '../../security/privacy-gate.js';
+import { OpenAIProvider } from '../../application/openai-provider.js';
+import { createFFmpegFrameExtractor } from '../../media-engine/ffmpeg-frame-extractor.js';
+import { createFFmpegImagePreparer } from '../../media-engine/ffmpeg-image-preparer.js';
 
 const projectRoot = resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
 loadDotEnv(join(projectRoot, '.env'));
@@ -30,11 +33,22 @@ if (!ownerId) throw new Error('Set HAEJUMI_OWNER_ID before starting the server.'
 const dataDir = ensureStorageDirectory(resolve(process.env.HAEJUMI_DATA_DIR || './data'));
 const maxMediaBytes = Number(process.env.HAEJUMI_MAX_MEDIA_BYTES || 52_428_800);
 if (!Number.isSafeInteger(maxMediaBytes) || maxMediaBytes < 1) throw new Error('Invalid HAEJUMI_MAX_MEDIA_BYTES.');
+const maxVisionImages = parseInteger(process.env.HAEJUMI_OPENAI_MAX_IMAGES_PER_ANALYSIS, 5);
+if (maxVisionImages < 1 || maxVisionImages > 20) throw new Error('Invalid HAEJUMI_OPENAI_MAX_IMAGES_PER_ANALYSIS.');
+const llmEnabled = parseBoolean(process.env.HAEJUMI_LLM_ENABLED, false);
+const openAiKey = process.env.HAEJUMI_OPENAI_API_KEY || '';
+const openAiModel = process.env.HAEJUMI_OPENAI_MODEL || '';
+const openAiProvider = llmEnabled && openAiKey && openAiModel ? new OpenAIProvider({ apiKey: openAiKey, model: openAiModel,
+  timeoutMs: parseInteger(process.env.HAEJUMI_OPENAI_TIMEOUT_MS, 20_000),
+  maxImages: maxVisionImages,
+  estimatedCostUsd: parseNumber(process.env.HAEJUMI_LLM_ESTIMATED_COST_PER_ITEM_USD, 0.01) }) : null;
 
 const state = new JsonState(safeStoragePath(dataDir, 'state.json'));
-const repositories = new LocalRepositories({ state, dataDir, maxMediaBytes });
-const llmEnabled = parseBoolean(process.env.HAEJUMI_LLM_ENABLED, false);
-const llmGateway = new LLMGateway({ enabled: llmEnabled, privacyGate: new PrivacyGate(), state,
+const repositories = new LocalRepositories({ state, dataDir, maxMediaBytes, maxVisionImages,
+  videoFrameExtractor: openAiProvider ? createFFmpegFrameExtractor() : null, imagePreparer: openAiProvider ? createFFmpegImagePreparer() : null });
+const privacyGate = new PrivacyGate({ enabled: Boolean(llmEnabled && openAiProvider), providerAllowlist: openAiProvider ? ['openai'] : [],
+  consentVerifier: (context) => repositories.verifyPrivacyConsent(context) });
+const llmGateway = new LLMGateway({ enabled: llmEnabled, provider: openAiProvider, privacyGate, state,
   limits: { dailyUsd: parseNumber(process.env.HAEJUMI_LLM_DAILY_BUDGET_USD, 0.20),
     monthlyUsd: parseNumber(process.env.HAEJUMI_LLM_MONTHLY_BUDGET_USD, 5),
     maxCallsPerTask: parseInteger(process.env.HAEJUMI_LLM_MAX_CALLS_PER_TASK, 5),

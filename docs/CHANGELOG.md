@@ -55,3 +55,9 @@
 - 외부 전송 동의와 게시 최종 승인을 분리하고, 최신 버전·해시·계정·공개범위·문구 및 권리 `allow`를 서버에서 재검증하는 제안 명시.
 - Blog/Music은 미래 Registry capability로만 표현; 현재 MVP 4개 Agent 결정은 변경하지 않음.
 - 세부 계약은 사용자 승인 대기이며 기능 코드 변경 없음.
+
+## 2026-10-30 — OpenAI Vision Gateway 기반 연결
+- OpenAI Responses API adapter, server `.env` 설정, 기본 비활성/timeout/no-retry/cost reservation을 연결.
+- 처리 notice 조회와 owner·목적·data category·정확한 선택 미디어 ID에 묶인 명시 동의 생성/철회 API를 구현. PrivacyGate dispatch 직전 재검증으로 미동의·철회·불일치 egress 0회.
+- 선택 사진은 로컬 FFmpeg 크기 축소/메타데이터 제거, 선택 영상은 프레임 추출 후 최대 설정 개수(기본 5)만 시각 분석으로 전송. 구조화 scene 결과가 Creator 기획/자막 초안에 들어가며 기존 중간 승인/version hash 흐름 유지.
+- 외부 기본 비활성, Fake fetch/Mock 검증만 실행. 실제 OpenAI/유료 요청 0회. OpenAPI/API 설명·테스트 계획·개발 문서 갱신.

@@ -34,6 +34,12 @@
 | P7 최적화 | LLM Gateway·예산 고도화, 캐시·부분 재실행, 선택 후속 AI 음악 연구 | 단순 경로 LLM 0회, 예산 초과 차단 | P1에 기본 계측 선행 |
 | P8 출고 | Android E2E, 권리/보안 회귀, 백업·복원, 운영 지침 | 치명 보안 결함 0건 및 정의된 E2E 전부 통과 | 전 단계 |
 
+### P1E/P7 AI 기반 구현 기록 (2026-10-30)
+- `OpenAIProvider`는 Gateway 뒤에 있고 Responses API의 구조화 JSON+이미지 입력을 사용합니다. `.env` 키/model/명시적 `HAEJUMI_LLM_ENABLED=true`가 모두 있어야 provider가 만들어집니다. 예시 설정은 비활성/빈칸이며 실제 OpenAI 요청은 실행하지 않았습니다.
+- 먼저 고지 API를 읽고 `vision_analysis` + `selected_media,user_text`에 명시 동의해야 합니다. consent는 owner/purpose/provider/category/resource/expiry를 서버가 실제 egress 직전에 재검증하고, 철회·불일치·오류 시 외부 요청은 0회입니다.
+- 선택 사진은 로컬 FFmpeg 축소·메타데이터 제거, 선택 영상은 로컬에서 프레임을 한 장 추출합니다. 최대 5개 준비 이미지만 전달하고 구조화 장면/자막 결과를 현재 Creator plan version에 연결합니다. FFmpeg 준비 실패 시 외부 모델 호출 대신 규칙 fallback.
+- API/Consent notice, 소유권·철회, fake OpenAI fetch, output schema, timeout·비재시도, zero-egress 테스트를 추가했습니다. 실제 provider 정책/계정 보존 설정, 선택 모델 지원 여부 및 실제 유료 호출은 미검증·대기 상태입니다.
+
 ## D. P0 환경 점검 표 (기록 후 진행)
 - [ ] 프로젝트 루트 Git 초기화 여부/원본 스냅샷/`.gitignore` 확인. `data/`, `.env`, 토큰·백업 저장소는 Git 제외.
 - [ ] Windows/WSL2, CPU/RAM/GPU, 디스크 용량 및 설치 권한 확인.

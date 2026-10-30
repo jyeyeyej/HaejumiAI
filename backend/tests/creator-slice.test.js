@@ -28,7 +28,8 @@ const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t, rendererFactory = null) {
   const dataDir = mkdtempSync(join(tmpdir(), 'haejumi-test-'));
   const state = new JsonState(join(dataDir, 'state.json'));
-  const repositories = new LocalRepositories({ state, dataDir, maxMediaBytes: 1024 * 1024 });
+  const repositories = new LocalRepositories({ state, dataDir, maxMediaBytes: 1024 * 1024,
+    imagePreparer: async () => Buffer.from('prepared-test-jpeg'), videoFrameExtractor: async () => Buffer.from('prepared-test-frame') });
   const auth = { async authenticate(header) {
     const value = /^Bearer (.+)$/.exec(header || '')?.[1];
     if (value === tokenA) return { ownerId: 'owner-a' };
@@ -60,6 +61,38 @@ test('auth is required before private API routes', async (t) => {
   assert.equal((await response.json()).error.code, 'AUTHENTICATION_REQUIRED');
 });
 
+test('privacy notice is disclosed, scoped consent is owner-bound, and revocation blocks verification', async (t) => {
+  const { base, repositories } = await fixture(t);
+  const { mediaId } = await prepareUnapprovedProject(base, 6111);
+  const noticeResponse = await fetch(`${base}/privacy/processing-notice?provider_id=openai&purpose=vision_analysis`, { headers: headers() });
+  assert.equal(noticeResponse.status, 200);
+  const notice = await noticeResponse.json();
+  assert.match(notice.disclosure, /OpenAI API로 전송/);
+  assert.deepEqual(notice.data_categories, ['selected_media', 'user_text']);
+  const consentInput = { provider_id: 'openai', purpose: 'vision_analysis', data_categories: notice.data_categories, resource_ids: [mediaId],
+    notice_id: notice.notice_id, notice_version: notice.notice_version, explicitly_confirmed: true,
+    expires_at: new Date(Date.now() + 60_000).toISOString() };
+  const created = await fetch(`${base}/privacy/consents`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'privacy-consent-confirm-001' }, body: JSON.stringify(consentInput) });
+  assert.equal(created.status, 201);
+  const consent = await created.json();
+  const context = { ownerId: 'owner-a', consentId: consent.consent_id, providerId: 'openai', purpose: 'vision_analysis', dataCategories: ['selected_media', 'user_text'], resourceIds: [mediaId] };
+  assert.equal(repositories.verifyPrivacyConsent(context), true);
+  const overbroad = await fetch(`${base}/privacy/consents`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'privacy-consent-overbroad-001' }, body: JSON.stringify({
+    ...consentInput, data_categories: [...notice.data_categories, 'diary'],
+  }) });
+  assert.equal(overbroad.status, 422);
+  const unsupportedPurpose = await fetch(`${base}/privacy/consents`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'privacy-consent-stt-001' }, body: JSON.stringify({
+    ...consentInput, purpose: 'stt', data_categories: ['transcript'],
+  }) });
+  assert.equal(unsupportedPurpose.status, 422);
+  assert.equal(repositories.verifyPrivacyConsent({ ...context, ownerId: 'owner-b' }), false);
+  assert.equal(repositories.verifyPrivacyConsent({ ...context, resourceIds: ['99999999-9999-4999-8999-999999999999'] }), false);
+  const revoke = await fetch(`${base}/privacy/consents/${consent.consent_id}`, { method: 'DELETE', headers: { ...headers(), 'idempotency-key': 'privacy-consent-revoke-001' } });
+  assert.equal(revoke.status, 204);
+  assert.equal(repositories.verifyPrivacyConsent(context), false);
+  assert.equal((await fetch(`${base}/privacy/consents/${consent.consent_id}`, { method: 'DELETE', headers: { ...headers(tokenB), 'idempotency-key': 'privacy-consent-revoke-b-001' } })).status, 404);
+});
+
 test('Supervisor routes registered Agents and Creator plan/draft approvals advance with version invalidation', async (t) => {
   const { base, repositories, mockLLM } = await fixture(t);
   const capabilities = await fetch(`${base}/capabilities`, { headers: headers() }).then((r) => r.json());
@@ -78,8 +111,13 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
     text: '영상 쇼츠 기획', input_kind: 'confirmed_transcript', confirmed_transcript: false,
   }) });
   assert.equal(unconfirmedTranscript.status, 409);
+  const notice = await fetch(`${base}/privacy/processing-notice?provider_id=openai&purpose=vision_analysis`, { headers: headers() }).then((r) => r.json());
+  const consent = await fetch(`${base}/privacy/consents`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'creator-vision-consent-0001' }, body: JSON.stringify({
+    provider_id: 'openai', purpose: 'vision_analysis', data_categories: notice.data_categories, resource_ids: [mediaId], notice_id: notice.notice_id,
+    notice_version: notice.notice_version, explicitly_confirmed: true, expires_at: new Date(Date.now() + 60_000).toISOString(),
+  }) }).then((r) => r.json());
   const planResponse = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-creator-plan-key-1' }, body: JSON.stringify({
-    text: '선택한 사진으로 여행 쇼츠 기획과 자막을 만들어줘', task_id: project.task_id, attachment_ids: [mediaId],
+    text: '선택한 사진으로 여행 쇼츠 기획과 자막을 만들어줘', task_id: project.task_id, attachment_ids: [mediaId], privacy_consent_id: consent.consent_id,
   }) });
   assert.equal(planResponse.status, 202);
   const routed = await planResponse.json();
@@ -95,7 +133,7 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.equal(planRead.status, 200);
   assert.equal((await planRead.json()).content_hash, routed.content_hash);
   const idempotentReplay = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-creator-plan-key-1' }, body: JSON.stringify({
-    text: '선택한 사진으로 여행 쇼츠 기획과 자막을 만들어줘', task_id: project.task_id, attachment_ids: [mediaId],
+    text: '선택한 사진으로 여행 쇼츠 기획과 자막을 만들어줘', task_id: project.task_id, attachment_ids: [mediaId], privacy_consent_id: consent.consent_id,
   }) });
   assert.equal((await idempotentReplay.json()).checkpoint.checkpoint_id, routed.checkpoint.checkpoint_id);
   assert.equal(mockLLM.calls, 1);
@@ -116,7 +154,7 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.equal((await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() })).status, 200);
 
   const revision = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'creator-plan-revision-key-1' }, body: JSON.stringify({
-    content_version: 2, request_text: '장면 전개를 더 차분하게 수정해 주세요',
+    content_version: 2, request_text: '장면 전개를 더 차분하게 수정해 주세요', privacy_consent_id: consent.consent_id,
   }) });
   assert.equal(revision.status, 201);
   const revised = await revision.json();
@@ -125,7 +163,7 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.ok(Object.values(repositories.state.data.approvals).filter((item) => item.task_id === project.task_id).every((item) => item.status === 'invalidated'));
   assert.equal(mockLLM.calls, 2);
   const revisionReplay = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'creator-plan-revision-key-1' }, body: JSON.stringify({
-    content_version: 2, request_text: '장면 전개를 더 차분하게 수정해 주세요',
+    content_version: 2, request_text: '장면 전개를 더 차분하게 수정해 주세요', privacy_consent_id: consent.consent_id,
   }) });
   assert.equal((await revisionReplay.json()).content_hash, revised.content_hash);
   assert.equal(mockLLM.calls, 2);

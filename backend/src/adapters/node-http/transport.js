@@ -1,3 +1,5 @@
+import { PRIVACY_NOTICE_ID, PRIVACY_NOTICE_VERSION } from '../filesystem/repositories.js';
+
 const API_PREFIX = '/api/v1';
 const JSON_LIMIT = 1_048_576;
 
@@ -10,6 +12,27 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
       if (!principal) return sendError(response, 401, 'AUTHENTICATION_REQUIRED');
       const path = url.pathname.slice(API_PREFIX.length);
 
+      if (request.method === 'GET' && path === '/privacy/processing-notice') {
+        const purpose = url.searchParams.get('purpose');
+        const categories = purpose === 'vision_analysis' ? ['selected_media', 'user_text'] : purpose === 'llm_text' ? ['user_text'] : null;
+        if (url.searchParams.get('provider_id') !== 'openai' || !categories) return sendError(response, 422, 'VALIDATION_ERROR');
+        return sendJson(response, 200, { provider_id: 'openai', purpose, data_categories: categories,
+          notice_id: PRIVACY_NOTICE_ID, notice_version: PRIVACY_NOTICE_VERSION,
+          disclosure: '선택한 사진 또는 로컬에서 추출한 선택 영상 프레임과 요청 문구가 OpenAI API로 전송되어 Creator 기획·자막 초안 생성에 사용됩니다. 외부 업체 처리이며 로컬 전용 처리가 아닙니다. 전송은 명시 동의 후에만 시작되고, 이미 전송된 데이터는 철회로 회수할 수 없습니다.',
+          provider_retention: 'OpenAI API의 데이터 처리·보존은 사용 계정 및 제공자 정책을 따릅니다. 해주미는 store=false를 요청하지만 이를 제공자 측 보존 정책 보증으로 간주하지 않습니다.' });
+      }
+      if (request.method === 'GET' && path === '/privacy/consents') return sendJson(response, 200, repositories.listPrivacyConsents(principal.ownerId));
+      if (request.method === 'POST' && path === '/privacy/consents') {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 201, repositories.createPrivacyConsent(principal.ownerId, await readJson(request), request.headers['idempotency-key']));
+      }
+      let consentMatch = /^\/privacy\/consents\/([0-9a-f-]+)$/.exec(path);
+      if (request.method === 'DELETE' && consentMatch) {
+        requireIdempotencyKey(request);
+        if (!repositories.revokePrivacyConsent(principal.ownerId, consentMatch[1])) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendEmpty(response, 204);
+      }
+
       if (request.method === 'GET' && path === '/capabilities') {
         if (!capabilityRegistry) return sendError(response, 503, 'SERVICE_UNAVAILABLE');
         return sendJson(response, 200, { items: capabilityRegistry.list() });
@@ -19,11 +42,12 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
         if (!supervisorRouter || !creatorAgent) return sendError(response, 503, 'SERVICE_UNAVAILABLE');
         requireJson(request); requireIdempotencyKey(request);
         const body = await readJson(request);
-        if (Object.keys(body).some((key) => !['text', 'input_kind', 'confirmed_transcript', 'attachment_ids', 'task_id'].includes(key)) ||
+        if (Object.keys(body).some((key) => !['text', 'input_kind', 'confirmed_transcript', 'attachment_ids', 'task_id', 'privacy_consent_id'].includes(key)) ||
             typeof body.text !== 'string' || !body.text.trim() || body.text.length > 12000 ||
             (body.input_kind !== undefined && !['typed_text', 'confirmed_transcript'].includes(body.input_kind)) ||
             (body.confirmed_transcript !== undefined && typeof body.confirmed_transcript !== 'boolean') ||
             (body.task_id !== undefined && typeof body.task_id !== 'string') ||
+            (body.privacy_consent_id !== undefined && !/^[0-9a-f-]{36}$/i.test(body.privacy_consent_id)) ||
             (body.attachment_ids !== undefined && (!Array.isArray(body.attachment_ids) || body.attachment_ids.some((id) => typeof id !== 'string')))) {
           return sendError(response, 422, 'VALIDATION_ERROR');
         }
@@ -45,7 +69,7 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
               const context = repositories.getOwnedCreatorContext(principal.ownerId, taskId, body.attachment_ids ?? []);
               if (!context) throw Object.assign(new Error('Creator task not found'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
               const result = await repositories.createCreatorPlan(principal.ownerId, taskId,
-                { content_version: context.task.current_version, request_text: body.text }, request.headers['idempotency-key'], creatorAgent);
+                { content_version: context.task.current_version, request_text: body.text, privacy_consent_id: body.privacy_consent_id }, request.headers['idempotency-key'], creatorAgent);
               plan = result.plan; checkpoint = result.checkpoint; taskId = result.task_id;
               generation = result.generation;
               contentVersion = result.content_version; contentHash = result.content_hash;
@@ -291,6 +315,8 @@ function sendJson(response, status, body) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   response.end(JSON.stringify(body));
 }
+
+function sendEmpty(response, status) { response.writeHead(status); response.end(); }
 
 function sendError(response, status, code) {
   const requestId = cryptoRandomId();

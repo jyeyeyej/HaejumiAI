@@ -142,6 +142,33 @@ paths:
         '204': { description: Session revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
+  /privacy/processing-notice:
+    get:
+      tags: [Privacy]
+      operationId: getOpenAIProcessingNotice
+      summary: Read the provider, purpose, and data disclosure before consent
+      parameters:
+        - { name: provider_id, in: query, required: true, schema: { type: string, enum: [openai] } }
+        - { name: purpose, in: query, required: true, schema: { type: string, enum: [vision_analysis, llm_text] } }
+      responses:
+        '200':
+          description: Server-owned disclosure shown before scoped consent
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [provider_id, purpose, data_categories, notice_id, notice_version, disclosure, provider_retention]
+                properties:
+                  provider_id: { type: string, const: openai }
+                  purpose: { type: string, enum: [vision_analysis, llm_text] }
+                  data_categories: { type: array, items: { type: string, enum: [selected_media, user_text] } }
+                  notice_id: { type: string, format: uuid }
+                  notice_version: { type: string }
+                  disclosure: { type: string }
+                  provider_retention: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
   /privacy/consents:
     get:
       tags: [Privacy]
@@ -167,7 +194,8 @@ paths:
       summary: Record explicit, scoped consent for external processing
       description: >-
         The authenticated user must confirm the displayed notice. The server accepts
-        only allowlisted providers and stores a consent receipt. This action does not
+        only the OpenAI provider for supported purposes and stores exact selected media IDs
+        for vision consent. This action does not
         itself send data to the provider. Consent is separate from publication approval.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -183,7 +211,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PrivacyConsent' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
   /privacy/consents/{consent_id}:
@@ -201,38 +229,6 @@ paths:
         '204': { description: Consent revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-        default: { $ref: '#/components/responses/Error' }
-  /privacy/external-processing-requests:
-    post:
-      tags: [Privacy]
-      operationId: requestExternalProcessing
-      summary: Request one explicitly consented external-processing operation
-      description: >-
-        This endpoint is not a consent grant. It checks an existing active consent
-        against provider, purpose, data categories, resource ownership and current
-        server policy both at acceptance and immediately before dispatch. Missing,
-        revoked, expired, overbroad or unverifiable consent returns 403 CONSENT_REQUIRED
-        and MUST cause zero outbound requests. The provider is selected from a
-        server-side allowlist. Task creation or user text cannot bypass this gate.
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ExternalProcessingRequest' }
-      responses:
-        '202':
-          description: Minimalized request queued after policy and consent checks
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Job' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/ValidationError' }
-        '503': { $ref: '#/components/responses/Unavailable' }
         default: { $ref: '#/components/responses/Error' }
   /capabilities:
     get:
@@ -262,8 +258,9 @@ paths:
         Rule-based routing uses only the authenticated request and registered capabilities.
         Multiple or unknown intents return clarification. A Creator task_id permits
         planning only from media already attached to that owned task. This endpoint does
-        not grant external-processing consent; any future external model request must
-        go through the LLM Gateway and server-side PrivacyGate.
+        not grant external-processing consent. OpenAI visual analysis requires a prior
+        server notice display and a matching consent_id; the LLM Gateway and PrivacyGate
+        revalidate it immediately before dispatch.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -337,7 +334,7 @@ paths:
       tags: [Tasks]
       operationId: createOrReviseCreatorPlan
       summary: Generate a structured Creator storyboard and caption draft for a current owned task
-      description: Uses only media already attached to the owned project. The default runtime has external AI disabled and uses a local fallback; any future external provider must be called through LLM Gateway and PrivacyGate. Every revision increments content_version and invalidates all earlier task approvals. This endpoint does not render or publish.
+      description: Uses only media already attached to the owned project. External AI is disabled by default and local rules are the fallback. Optional privacy_consent_id permits OpenAI visual analysis only when the server flag, key, and model are configured and PrivacyGate confirms owner, provider, purpose, resource IDs, categories, and active consent immediately before dispatch. Images are locally resized and metadata-stripped; selected video frames are locally extracted. Every revision increments content_version and invalidates all earlier task approvals. This endpoint does not render or publish.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -1147,49 +1144,27 @@ components:
         expires_at: { type: string, format: date-time }
     PrivacyPurpose:
       type: string
-      enum: [llm_text, stt, vision_analysis]
+      enum: [llm_text, vision_analysis]
     PrivacyConsentGrant:
       type: object
       additionalProperties: false
       required: [provider_id, purpose, data_categories, notice_id, notice_version, explicitly_confirmed, expires_at]
+      allOf:
+        - if: { properties: { purpose: { const: vision_analysis } }, required: [purpose] }
+          then:
+            required: [resource_ids]
+            properties:
+              resource_ids: { minItems: 1 }
+              data_categories:
+                minItems: 2
+                maxItems: 2
+                allOf:
+                  - contains: { const: selected_media }
+                  - contains: { const: user_text }
+        - if: { properties: { purpose: { const: llm_text } }, required: [purpose] }
+          then: { properties: { data_categories: { const: [user_text] } } }
       properties:
-        provider_id: { type: string, minLength: 1 }
-        purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
-        data_categories:
-          type: array
-          minItems: 1
-          uniqueItems: true
-          items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
-        notice_version: { type: string }
-        notice_id: { type: string, format: uuid }
-        explicitly_confirmed: { type: boolean, const: true }
-        expires_at: { type: string, format: date-time }
-    PrivacyConsent:
-      type: object
-      additionalProperties: false
-      required: [consent_id, provider_id, purpose, data_categories, notice_id, notice_version, explicitly_confirmed, expires_at, status, created_at]
-      properties:
-        consent_id: { type: string, format: uuid }
-        provider_id: { type: string, minLength: 1 }
-        purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
-        data_categories:
-          type: array
-          minItems: 1
-          uniqueItems: true
-          items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
-        notice_version: { type: string }
-        notice_id: { type: string, format: uuid }
-        explicitly_confirmed: { type: boolean, const: true }
-        expires_at: { type: string, format: date-time }
-        status: { type: string, enum: [active, revoked, expired] }
-        created_at: { type: string, format: date-time }
-    ExternalProcessingRequest:
-      type: object
-      additionalProperties: false
-      required: [consent_id, provider_id, purpose, data_categories, resource_ids]
-      properties:
-        consent_id: { type: string, format: uuid }
-        provider_id: { type: string, minLength: 1 }
+        provider_id: { type: string, const: openai }
         purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
         data_categories:
           type: array
@@ -1198,9 +1173,33 @@ components:
           items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
         resource_ids:
           type: array
-          minItems: 1
+          uniqueItems: true
           items: { type: string, format: uuid }
-        task_id: { type: string, format: uuid }
+          description: For vision_analysis, the exact selected media IDs must be non-empty and owner-authorized.
+        notice_version: { type: string }
+        notice_id: { type: string, format: uuid }
+        explicitly_confirmed: { type: boolean, const: true }
+        expires_at: { type: string, format: date-time }
+    PrivacyConsent:
+      type: object
+      additionalProperties: false
+      required: [consent_id, provider_id, purpose, data_categories, resource_ids, notice_id, notice_version, explicitly_confirmed, expires_at, status, created_at]
+      properties:
+        consent_id: { type: string, format: uuid }
+        provider_id: { type: string, const: openai }
+        purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
+        data_categories:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, enum: [selected_media, transcript, user_text, schedule, diary, wellness] }
+        resource_ids: { type: array, uniqueItems: true, items: { type: string, format: uuid } }
+        notice_version: { type: string }
+        notice_id: { type: string, format: uuid }
+        explicitly_confirmed: { type: boolean, const: true }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, revoked, expired] }
+        created_at: { type: string, format: date-time }
     Capability:
       type: object
       additionalProperties: false
@@ -1224,6 +1223,7 @@ components:
         confirmed_transcript: { type: boolean, default: false }
         attachment_ids: { type: array, items: { type: string, format: uuid } }
         task_id: { type: string, format: uuid, description: Existing owned Creator task; required to create a storyboard from its selected project media. }
+        privacy_consent_id: { type: string, format: uuid, description: Optional active OpenAI vision consent; does not enable external calls by itself. }
     AssistantMessageResponse:
       type: object
       additionalProperties: false
@@ -1247,6 +1247,7 @@ components:
       properties:
         content_version: { type: integer, minimum: 1 }
         request_text: { type: string, minLength: 1, maxLength: 4000 }
+        privacy_consent_id: { type: string, format: uuid, description: Optional owner-bound consent for OpenAI vision analysis. }
     CreatorPlanResult:
       type: object
       additionalProperties: false
@@ -1304,7 +1305,7 @@ components:
     GenerationMetadata:
       type: object
       additionalProperties: false
-      required: [source, fallback_used, llm_calls, estimated_cost_usd]
+      required: [source, fallback_used, llm_calls, estimated_cost_usd, gate_reason]
       properties:
         source: { type: string, enum: [mock, gateway, local_rules] }
         fallback_used: { type: boolean }

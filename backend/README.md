@@ -23,8 +23,12 @@ npm start
 The parser permits only the declared `HAEJUMI_*` settings used by this backend. The server
 still binds to `127.0.0.1`; this single-owner development bearer mechanism is not the
 approved production authentication design. LLM settings default to disabled and configure
-daily/monthly budget plus per-task call/revision caps. No OpenAI provider or API key is
-configured; tests inject a local fake provider only.
+daily/monthly budget plus per-task call/revision caps. OpenAI is wired behind that gateway,
+but remains disabled unless explicitly enabled with a server-side `.env` key/model and an
+active owner-scoped `vision_analysis` consent. Consent notices and revocation are exposed
+under `/api/v1/privacy`; the tests use synthetic keys and fake fetch only. The server never
+logs provider credentials. Local FFmpeg resizes images/removes metadata and extracts video
+frames before any permitted provider dispatch.
 
 See `backend/src/ports`, `backend/src/security`, and `backend/src/adapters` for replaceable boundaries.
 

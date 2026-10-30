@@ -77,8 +77,9 @@ Android (선택 사진·영상/확인된 텍스트·STT)
 ### 예투 Supervisor / Creator 기획 참조 구현
 - `backend/src/agents/capability-registry.js`: Creator 구현, Schedule/Wellness/Diary는 라우팅 등록, Blog/Music은 비활성 extension placeholder입니다.
 - `backend/src/agents/supervisor-router.js`: 외부 LLM 없이 규칙으로 Agent 하나를 선택하고 복수 의도/미분류는 clarification으로 반환합니다.
-- `backend/src/agents/creator-agent.js`: 소유 프로젝트의 선택 media ID/type와 사용자 요청에서 구조화 계획·자막 초안을 생성합니다. 현재 외부 모델 미연결이라 서버는 local-rules fallback을 사용하고 Fake LLM은 테스트에만 주입합니다.
-- `LLMGateway`는 기본 비활성이고 `PrivacyGate`는 서버 consent verifier가 없으면 항상 deny합니다. 현재 OpenAI provider 및 동의 저장 API가 없어 외부 egress는 불가능합니다.
+- `backend/src/agents/creator-agent.js`: 소유 프로젝트의 선택 미디어와 요청으로 구조화 계획·자막 초안을 생성합니다. OpenAI를 켜지 않았거나 로컬 이미지 준비가 불가능하면 local-rules fallback을 사용합니다.
+- `OpenAIProvider`는 LLM Gateway 뒤의 Responses API 어댑터입니다. 서버 `.env`에서만 키를 읽고 외부 AI는 기본 비활성입니다. 고지 조회 → 명시적 scoped consent 기록 → 요청의 `privacy_consent_id` 전달 → 소유권/만료/범위 재검사를 통과해야 호출됩니다. 철회·불일치·검사 실패 시 네트워크 요청 0회입니다.
+- 사진 축소/EXIF 제거와 영상 프레임 추출은 로컬 FFmpeg 어댑터입니다. 최대 5개 준비 이미지와 최소 요청 문구만 외부로 보냅니다. 실제 OpenAI 연결/청구는 수행하지 않았으며, Fake LLM과 fake fetch 테스트만 사용했습니다.
 - 환경 예시: `HAEJUMI_LLM_ENABLED=false`, 일/월 예산, 작업별 호출 수·수정 수. 기본 한도는 실험 제안이며 비용 보증이 아닙니다. 예산 예약은 로컬 state에 저장하고 timeout은 자동 재시도하지 않습니다.
 - `ToolGateway`: LLM에 무제한 HTTP/브라우징/파일시스템/게시 도구 제공 금지; 서버 허용 목록·스키마·권한·승인을 만족할 때만 실행. 인젝션이 포함된 미디어 메타데이터·자막·웹문서는 명령으로 실행 금지.
 - 개인 기록 접근: Creator는 Wellness·Diary 원문 기본 접근 금지; Diary는 해당 날짜의 사용자 허용 데이터만 조회; 전체 기억/전체 대화의 자동 프롬프트 첨부 금지.

@@ -4,14 +4,78 @@ import { resolve } from 'node:path';
 import { canonicalManifestBytes, extensionMatches, isAllowedMediaType, isSafeDisplayName, sha256, validateMediaBytes } from '../../security/media-validation.js';
 import { ensureStorageDirectory, safeStoragePath } from '../../security/storage-paths.js';
 
+export const PRIVACY_NOTICE_ID = '610ef7d0-c730-4de0-b24c-5b80e9241d11';
+export const PRIVACY_NOTICE_VERSION = '1';
+
 export class LocalRepositories {
-  constructor({ state, dataDir, maxMediaBytes }) {
+  constructor({ state, dataDir, maxMediaBytes, maxVisionImages = 5, videoFrameExtractor = null, imagePreparer = null }) {
     this.state = state;
     this.dataDir = ensureStorageDirectory(dataDir);
     this.blobDir = ensureStorageDirectory(safeStoragePath(this.dataDir, 'media'), this.dataDir);
     this.uploadDir = ensureStorageDirectory(safeStoragePath(this.dataDir, 'uploads'), this.dataDir);
     this.renderDir = ensureStorageDirectory(safeStoragePath(this.dataDir, 'renders'), this.dataDir);
     this.maxMediaBytes = maxMediaBytes;
+    this.videoFrameExtractor = videoFrameExtractor;
+    this.imagePreparer = imagePreparer;
+    this.maxVisionImages = Number.isSafeInteger(maxVisionImages) && maxVisionImages > 0 ? maxVisionImages : 5;
+  }
+
+  listPrivacyConsents(ownerId) {
+    return { items: Object.values(this.state.data.privacyConsents).filter((item) => item.owner_id === ownerId && item.status === 'active' && Date.parse(item.expires_at) > Date.now())
+      .map(publicPrivacyConsent) };
+  }
+
+  createPrivacyConsent(ownerId, input, idempotencyKey) {
+    if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
+    const validPurposes = ['llm_text', 'vision_analysis'];
+    const categoriesByPurpose = { vision_analysis: ['selected_media', 'user_text'], llm_text: ['user_text'] };
+    const expires = Date.parse(input?.expires_at);
+    if (!input || Object.keys(input).some((key) => !['provider_id', 'purpose', 'data_categories', 'resource_ids', 'notice_id', 'notice_version', 'explicitly_confirmed', 'expires_at'].includes(key)) ||
+        input.provider_id !== 'openai' || !validPurposes.includes(input.purpose) || !Array.isArray(input.data_categories) || !input.data_categories.length ||
+        new Set(input.data_categories).size !== input.data_categories.length ||
+        JSON.stringify([...input.data_categories].sort()) !== JSON.stringify([...((categoriesByPurpose[input.purpose]) ?? [])].sort()) ||
+        (input.purpose === 'vision_analysis' && (!Array.isArray(input.resource_ids) || !input.resource_ids.length || new Set(input.resource_ids).size !== input.resource_ids.length || input.resource_ids.some((id) => !isUuid(id)))) ||
+        (input.purpose === 'llm_text' && input.resource_ids != null && (!Array.isArray(input.resource_ids) || input.resource_ids.length !== 0)) ||
+        input.notice_id !== PRIVACY_NOTICE_ID || input.notice_version !== PRIVACY_NOTICE_VERSION || input.explicitly_confirmed !== true ||
+        !Number.isFinite(expires) || expires <= Date.now()) throw apiError(422, 'VALIDATION_ERROR', '제공자·목적·전송 범위·고지 확인을 검증할 수 없습니다.');
+    for (const resourceId of input.resource_ids ?? []) {
+      const media = this.state.data.media[resourceId];
+      if (!media || media.ownerId !== ownerId || media.status !== 'available') throw apiError(404, 'RESOURCE_NOT_FOUND', '동의 대상 미디어를 찾을 수 없습니다.');
+    }
+    const key = `${ownerId}:privacy-consent:${idempotencyKey}`;
+    const fingerprint = JSON.stringify(input);
+    const prior = this.state.data.idempotency[key];
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '멱등 키가 다른 요청에 사용되었습니다.');
+      return publicPrivacyConsent(this.state.data.privacyConsents[prior.consent_id]);
+    }
+    const consent = { consent_id: randomUUID(), owner_id: ownerId, provider_id: input.provider_id, purpose: input.purpose,
+      data_categories: [...input.data_categories], resource_ids: [...(input.resource_ids ?? [])], notice_id: input.notice_id, notice_version: input.notice_version,
+      explicitly_confirmed: true, expires_at: new Date(expires).toISOString(), status: 'active', created_at: new Date().toISOString() };
+    this.state.data.privacyConsents[consent.consent_id] = consent;
+    this.state.data.idempotency[key] = { fingerprint, consent_id: consent.consent_id };
+    this.state.save();
+    return publicPrivacyConsent(consent);
+  }
+
+  revokePrivacyConsent(ownerId, consentId) {
+    const consent = this.state.data.privacyConsents[consentId];
+    if (!consent || consent.owner_id !== ownerId) return false;
+    consent.status = 'revoked'; consent.revoked_at = new Date().toISOString(); this.state.save(); return true;
+  }
+
+  verifyPrivacyConsent({ ownerId, consentId, providerId, purpose, dataCategories, resourceIds = [] }) {
+    const consent = this.state.data.privacyConsents[consentId];
+    if (!consent || consent.owner_id !== ownerId || consent.status !== 'active' || Date.parse(consent.expires_at) <= Date.now() ||
+        consent.provider_id !== providerId || consent.purpose !== purpose || !consent.explicitly_confirmed ||
+        !dataCategories.every((category) => consent.data_categories.includes(category)) ||
+        (purpose === 'vision_analysis' && JSON.stringify([...resourceIds].sort()) !== JSON.stringify([...(consent.resource_ids ?? [])].sort())) ||
+        (purpose === 'llm_text' && (consent.resource_ids?.length ?? 0) > 0)) return false;
+    for (const resourceId of resourceIds) {
+      const media = this.state.data.media[resourceId];
+      if (!media || media.ownerId !== ownerId || media.status !== 'available') return false;
+    }
+    return true;
   }
 
   createUpload(ownerId, items, idempotencyKey) {
@@ -253,12 +317,13 @@ export class LocalRepositories {
     if (!task || task.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
     const project = this.state.data.projects[task.project_id];
     if (!project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
-    if (!input || Object.keys(input).some((key) => !['content_version', 'request_text'].includes(key)) ||
+    if (!input || Object.keys(input).some((key) => !['content_version', 'request_text', 'privacy_consent_id'].includes(key)) ||
+        (input.privacy_consent_id !== undefined && !isUuid(input.privacy_consent_id)) ||
         !Number.isSafeInteger(input.content_version) || typeof input.request_text !== 'string' || !input.request_text.trim() || input.request_text.length > 4000) {
       throw apiError(422, 'VALIDATION_ERROR', '현재 콘텐츠 버전과 기획 요청을 확인해 주세요.');
     }
     if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
-    const fingerprint = JSON.stringify({ task_id: taskId, content_version: input.content_version, request_text: input.request_text.trim() });
+    const fingerprint = JSON.stringify({ task_id: taskId, content_version: input.content_version, request_text: input.request_text.trim(), privacy_consent_id: input.privacy_consent_id ?? null });
     const key = `${ownerId}:creator-plan:${idempotencyKey}`;
     const prior = this.state.data.idempotency[key];
     if (prior) {
@@ -276,8 +341,35 @@ export class LocalRepositories {
     this.state.data.idempotency[key] = { fingerprint, status: 'generating' };
     this.state.save();
     try {
-      const generated = await creatorAgent.createPlan({ taskId, project: structuredClone(project), requestText: input.request_text.trim(),
-        media: media.map((item) => ({ mediaId: item.mediaId, mediaType: item.mediaType })), revision: Boolean(project.creator_plan) });
+      const selectedMedia = [];
+      let preparedImageCount = 0;
+      for (const item of media) {
+        const selected = { mediaId: item.mediaId, mediaType: item.mediaType };
+        if (input.privacy_consent_id && preparedImageCount < this.maxVisionImages) {
+          try {
+            const bytes = readRegularFile(safeStoragePath(this.blobDir, item.storageKey));
+            if (sha256(bytes) !== item.sha256) throw apiError(409, 'VERSION_CONFLICT', '선택 미디어 무결성 검증에 실패했습니다.');
+            if (item.mediaType.startsWith('image/') && this.imagePreparer) {
+              const prepared = await this.imagePreparer(safeStoragePath(this.blobDir, item.storageKey));
+              if (Buffer.isBuffer(prepared) && prepared.length > 0 && prepared.length <= 2 * 1024 * 1024) {
+                selected.imageDataUrl = `data:image/jpeg;base64,${prepared.toString('base64')}`; preparedImageCount += 1;
+              }
+            }
+            else if (item.mediaType.startsWith('video/') && this.videoFrameExtractor) {
+              const frame = await this.videoFrameExtractor(safeStoragePath(this.blobDir, item.storageKey));
+              if (Buffer.isBuffer(frame) && frame.length > 0 && frame.length <= 2 * 1024 * 1024) {
+                selected.imageDataUrl = `data:image/jpeg;base64,${frame.toString('base64')}`; preparedImageCount += 1;
+              }
+            }
+          } catch (error) {
+            if (error?.code === 'VERSION_CONFLICT') throw error;
+            // Missing local FFmpeg or an unsupported video is a safe local fallback.
+          }
+        }
+        selectedMedia.push(selected);
+      }
+      const generated = await creatorAgent.createPlan({ ownerId, taskId, project: structuredClone(project), requestText: input.request_text.trim(),
+        media: selectedMedia, revision: Boolean(project.creator_plan), privacyConsentId: input.privacy_consent_id ?? null });
       if (task.current_version !== expectedVersion || task.active_job_id) throw apiError(409, 'VERSION_CONFLICT', '기획 생성 중 콘텐츠 버전이 변경되었습니다.');
       for (const approval of Object.values(this.state.data.approvals)) if (approval.task_id === taskId && approval.status === 'active') approval.status = 'invalidated';
       for (const checkpoint of Object.values(this.state.data.checkpoints)) if (checkpoint.task_id === taskId && ['pending', 'approved'].includes(checkpoint.status)) checkpoint.status = 'invalidated';
@@ -798,6 +890,11 @@ function mediaItemsMatch(items, upload, digest, sizeBytes) {
   const item = items[0];
   return item?.client_item_id?.toLowerCase() === upload.clientItemId.toLowerCase() &&
     item?.sha256?.toLowerCase() === digest.toLowerCase() && item?.size_bytes === sizeBytes;
+}
+
+function publicPrivacyConsent(consent) {
+  const { owner_id: _ownerId, ...publicConsent } = consent;
+  return structuredClone(publicConsent);
 }
 
 function readRegularFile(path) {

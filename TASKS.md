@@ -147,8 +147,14 @@ Mock vs 실제 서비스:
 - Capability Registry에 Creator/Schedule/Wellness/Diary를 등록했습니다. Creator만 구현 상태이며 Schedule/Wellness/Diary는 라우팅 등록만 하고 개인 기능을 실행하지 않습니다. Blog/Music은 비활성 확장 항목입니다.
 - 규칙 기반 Supervisor는 요청을 capability로 분류하고 모호한 복수 의도는 사용자 명확화를 요청합니다. Creator 요청은 소유 task의 선택 프로젝트 미디어만 사용합니다.
 - Creator 기획은 구조화 쇼츠 장면표와 자막 초안을 저장하고 `plan` 승인 뒤 초안을 표시합니다. 기획 재수정은 새 버전/hash를 만들고 기존 승인을 무효화합니다. 기존 plan/draft 승인 및 렌더 준비 전이는 유지됩니다.
-- LLM Gateway는 기본 비활성, PrivacyGate는 서버 consent verifier 부재 시 fail closed, OpenAI provider는 미연결입니다. 일/월 예산과 작업별 호출·수정 한도는 설정 가능하고 state에 예산 예약을 저장합니다. timeout은 자동 재시도하지 않습니다. 운영은 local-rules fallback, Fake LLM은 테스트 전용입니다.
-- 테스트: Registry 확장/라우팅, Creator 계획·중간 승인·수정 무효화·멱등성, 타인 task 거부, LLM 비활성/동의 차단/예산 한도. OpenAI 요청·개인정보 외부 전송은 0회.
+- LLM Gateway는 기본 비활성, 일/월 예산과 작업별 호출·수정 한도는 설정 가능하고 state에 예산 예약을 저장합니다. timeout은 자동 재시도하지 않습니다. 운영은 local-rules fallback, Fake LLM은 테스트 전용입니다.
+- 테스트 당시에는 OpenAI adapter 및 동의 API 구현 전이어서 외부 요청 0회였습니다.
+
+## OpenAI Vision Gateway 기반 연결 (2026-10-30)
+- OpenAI Responses adapter를 LLM Gateway 뒤에 추가했습니다. 실제 provider는 `HAEJUMI_LLM_ENABLED=true`, `.env`의 `HAEJUMI_OPENAI_API_KEY`와 모델 설정이 모두 있을 때만 구성됩니다. 예시 설정은 비활성/빈칸입니다.
+- `/privacy/processing-notice`, `/privacy/consents` 조회·기록·철회 및 owner/purpose/category/selected media resource 검사를 구현했습니다. Creator `privacy_consent_id` 없거나 동의가 철회/만료/다른 범위이면 PrivacyGate가 egress 전에 차단합니다.
+- 사진은 로컬 FFmpeg로 축소/메타데이터 제거, 선택 영상은 프레임 1장 로컬 추출. 준비된 이미지 최대 5개만 전송하며 diary/wellness 자료는 Creator 입력에 없습니다. 준비 실패 시 외부 호출 0회로 규칙 fallback합니다.
+- Fake fetch/Mock으로 OpenAI payload, 동의 생성·철회·소유권, 외부 호출 0회, timeout/no-retry를 테스트합니다. 실제 OpenAI·유료 호출은 실행하지 않았습니다. 실계정/모델 지원, 제공자 보존 정책, 사용자 고지 UX와 실제 호출 승인 확인은 남았습니다.
 
 
 ## v1.1 정렬 관련

@@ -32,6 +32,9 @@
 | LLM-03 | Mock provider 테스트 | LLM Gateway만 호출; 실제 OpenAI/외부 요청 0 |
 | LLM-04 | 일·월 비용 한도 또는 작업 호출 제한 도달 | 추가 provider 호출 0; `LLM_BUDGET_EXCEEDED` fallback |
 | LLM-05 | 외부 처리 timeout/결과 불명 | 자동 재요청 없음; local fallback, 예약된 한도 유지 |
+| LLM-06 | OpenAI Responses adapter에 synthetic key/fake fetch 사용 | 형식·timeout·오류 축약·store=false 확인; 실네트워크 0 |
+| LLM-07 | 5개 초과 선택 항목 | 이미지 입력 최대 5개; 나머지 파일 본문 미전송 |
+| LLM-08 | API key 누락 또는 모델 미설정 | OpenAI provider 구성 안 됨; local fallback; 호출 0 |
 | AUTH-03 | request body에 위조 `user_id` 포함 | 소유권은 인증 주체로만 계산; 위조 ID 무시 또는 `422 VALIDATION_ERROR` |
 | AUTH-04 | Creator가 Diary/Wellness scope를 요청 | `403 FORBIDDEN`; 민감 데이터 조회 0회 |
 | AUTH-05 | Diary가 요청 날짜 외 source 또는 허용되지 않은 source ID 참조 | `404 RESOURCE_NOT_FOUND`; 원문 접근 0회 |
@@ -79,17 +82,23 @@
 
 | ID | 상황 | 기대 결과 |
 |---|---|---|
-| PRIV-01 | consent 없이 외부 LLM 요청 | `403 CONSENT_REQUIRED`; egress counter 0 |
-| PRIV-02 | consent 없이 외부 STT 요청 | `403 CONSENT_REQUIRED`; egress counter 0; 원본 음성 잔존 없음 |
-| PRIV-03 | 동의 없는 vision/분석 요청 | `403 CONSENT_REQUIRED`; image/media egress counter 0 |
-| PRIV-04 | STT 동의로 vision 요청 | `403 PRIVACY_POLICY_DENIED`; egress counter 0 |
-| PRIV-05 | consent provider가 서버 allowlist에 없음 | consent 생성 거부 `403 PRIVACY_POLICY_DENIED`; 이후 요청 egress 0 |
+| PRIV-01 | consent 없이 외부 LLM 요청 | Gateway dispatch 거부; Creator plan은 local fallback; egress counter 0 |
+| PRIV-02 | consent 없이 외부 STT 요청 | 외부 STT dispatch 거부; egress counter 0; 원본 음성 잔존 없음 |
+| PRIV-03 | 동의 없는 vision/분석 요청 | local fallback; image/media egress counter 0 |
+| PRIV-04 | STT 동의로 vision 요청 | 범위 불일치 dispatch 거부; egress counter 0 |
+| PRIV-05 | consent provider가 서버 allowlist에 없음 | consent 생성 `422 VALIDATION_ERROR`; 이후 egress 0 |
 | PRIV-06 | consent 명시 확인/고지 ID 누락 또는 notice version 불일치 | `422 VALIDATION_ERROR` 또는 정책 거부; 활성 consent 생성 없음 |
 | PRIV-07 | consent 철회 후 대기 작업 dispatch | 작업 취소/차단; 실제 전송 직전 검사에서 egress counter 0 |
-| PRIV-08 | 동의가 만료된 뒤 재시도/백그라운드 재실행 | `403 CONSENT_REQUIRED`; 매 시도 egress 0 |
-| PRIV-09 | 오류/timeout 이후 외부 처리 재시도 시 consent가 철회됨 | 재시도 차단; 추가 egress 0 |
+| PRIV-08 | 동의가 만료된 뒤 재요청 | local fallback; 매 시도 egress 0 |
+| PRIV-09 | 오류/timeout 이후 요청 전에 consent 철회 | 재요청은 local fallback; 추가 egress 0 |
 | PRIV-10 | 사용자 프롬프트나 media metadata가 외부 전송을 지시 | 권한 승격 안 됨; PrivacyGate가 동일 판정 |
-| PRIV-11 | 게시 승인 또는 중간 승인 ID를 외부 처리 동의로 제출 | `403 CONSENT_REQUIRED`/`403 PRIVACY_POLICY_DENIED`; egress 0 |
+| PRIV-11 | 게시 승인 또는 중간 승인 ID를 external consent ID 대신 제출 | consent lookup/scope 실패; local fallback; egress 0 |
+| PRIV-12 | notice 미리보기·버전 확인 뒤 범위 일치 consent 생성 | `201`; consent 기록만으로 provider 호출 0 |
+| PRIV-13 | 다른 소유자의 consent ID 또는 미디어 resource ID | PrivacyGate 거부; provider 호출 0 |
+| PRIV-14 | Creator 요청에 consent 없이 OpenAI adapter가 설정됨 | Gateway fallback; OpenAI fetch 0 |
+| PRIV-15 | consent 철회 후 같은 task 재시도 | `CONSENT_REQUIRED` fallback; 추가 OpenAI fetch 0 |
+| PRIV-16 | 로컬 이미지 축소/영상 프레임 추출 실패 | 준비된 visual input 없음; OpenAI 호출 0; 규칙 fallback |
+| PRIV-17 | 처리 notice와 다른 data category/purpose | consent 거부; provider 호출 0 |
 
 ## 승인 상태와 허용 조합
 
