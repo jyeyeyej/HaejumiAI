@@ -90,3 +90,7 @@
 - [절대 준수] 확장 기능도 사용자별 권한과 데이터 최소화, LLM 외부 전송 기본 차단, 발행·게시 시 결과 버전/대상 계정/공개범위별 최종 승인, 예산 제한을 우회할 수 없다. 블로그 자동 공개 게시도 기본 OFF.
 - [주의] 음악 생성 모델·음원별 상업 이용 허용 여부가 검증되지 않으면 생성·사용·게시 성공으로 표시하지 않는다.
 - 상세 기준: `docs/26-EXTENSIBILITY.md`.
+
+## 2026-11-03 사용자 확정 후속 결정
+- 위의 Android 기술·PC React 범위에 관한 과거 제안/대기 표기는 당시 검토 이력입니다. 현재는 **Kotlin/Jetpack Compose Android 앱 + localhost React PC 웹 + 공통 Node.js 참조 `/api/v1` 서버**가 사용자 확정 방향입니다(`docs/DECISIONS.md` D121~D125). Node.js의 장래 최종 스택은 별도 결정입니다.
+- PC 웹은 직접 선택 파일만 전송하며 외부 공개를 기본 차단합니다. Android 사설 HTTPS 연결은 실기기에서 검증 전입니다. 네 Agent의 양쪽 사용은 목표이고, Schedule·Wellness·Diary는 구현 전 준비 중으로 표시합니다.

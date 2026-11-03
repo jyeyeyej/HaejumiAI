@@ -1,5 +1,11 @@
 # 프론트엔드–백엔드 API 계약서
 
+## 다중 미디어 업로드 확장 기록 (2026-11-03, 제안 계약)
+
+`POST /api/v1/media/uploads`는 선택한 미디어 1~20개의 순서 있는 `items` 배열을 받습니다. 여러 항목인 경우 `PUT /media/uploads/{upload_id}/parts/{part_number}`의 번호는 1부터 시작하는 항목 순서이며 파일마다 한 조각입니다. `complete`는 동일 순서의 `items`와 canonical manifest SHA-256을 요구합니다. 단일 파일의 기존 완료 형식은 유지합니다. 프로젝트 생성은 순서 있는 `media_ids`를 받으며 조회 응답의 `media_manifest`에 순서·ID·검증된 해시를 담습니다. 서버 운영 상한은 `HAEJUMI_MAX_SELECTED_MEDIA`로 1~30개에서 설정할 수 있습니다. 이 경로의 정식 계약 승인 여부는 별도 결정 사항입니다.
+
+`PUT /api/v1/tasks/{task_id}/plan`은 현재 버전·해시와 장면별 미디어 ID·길이·선택 영상 시작 위치를 받습니다. 서버는 미디어 집합과 길이 합을 검증하고 새 콘텐츠 버전을 만들며 승인·미리보기를 무효화합니다. 같은 멱등 키의 동일 요청은 저장된 결과를 돌려줍니다.
+
 > 프로젝트: **해주미(Haejumi)** · AI 비서 이름: **예투**  
 > 상태: **v0.3.3 기준 OpenAPI 3.1 설계 초안 v0.5 [제안/승인 대기]** · 수정일: 2026-10-30 · 대상: 1인 개인용, 향후 다중 사용자 확장  
 > 원칙: **존댓말 응답 / 크리에이터 상업적 수익화 / 권리 검증 / 사용자 통제 / 로컬 우선**  
@@ -31,14 +37,20 @@
 | POST | `/tasks/{id}/plan` | Creator 쇼츠 기획·자막 초안 생성/수정 | 소유 프로젝트 미디어, Idempotency-Key, 버전 증가/승인 무효화 |
 | GET | `/tasks/{id}/plan` | 현재 기획안·승인 checkpoint 조회 | 인증·소유권 |
 | GET | `/tasks/{id}/draft` | plan 승인 후 자막 초안 읽기 | 현재 버전의 활성 plan 승인 |
+| PATCH | `/tasks/{id}/draft` | 자막·음원·원음/BGM 음량·페이드 수정 | 현재 버전/hash와 멱등 키, 새 버전 및 과거 승인 무효화 |
+| GET/POST | `/music/tracks` | 소유자의 로컬 음원 목록·메타데이터 등록 | 사용자 선택 음원, 권리·증빙, 소유권 |
+| PUT | `/music/tracks/{id}/content` | 선택 WAV/MP3 업로드 | 크기·SHA-256·형식 signature 검증 |
+| PATCH | `/music/tracks/{id}/rights` | 음원별 권리·증빙 수정 | 권리 revision 검사 및 관련 최종 승인 무효화 |
 | POST | `/media/uploads` | 업로드 세션 생성 | 사용자가 선택한 항목만, 파일 한도 검증 |
 | PUT | `/media/uploads/{upload_id}/parts/{part_number}` | 파일 조각 업로드 | 업로드 세션 소유권·조각 멱등성 |
 | POST | `/media/uploads/{upload_id}/complete` | manifest 검증·업로드 완료 | 해시·크기·실제 형식, 제안 중복 방지 |
 | POST | `/content/projects` | 콘텐츠 프로젝트 생성 | 소유권, 멱등성 |
+| GET | `/content/projects` | 소유자의 Creator 프로젝트 목록 | 인증·소유권, 새 항목 우선, 로컬 저장 경로 비노출 |
 | POST | `/tasks` | 모듈 작업 생성 | Registry 활성화·scope·입력 스키마 검사 |
 | POST | `/tasks/{id}/plan` | 기획 생성/조회 | 관련 자료만 사용 |
 | POST | `/tasks/{id}/feedback` | 수정·승인·보류·취소 | checkpoint, version, hash |
 | GET | `/tasks/{id}/checkpoints` | 승인 대기·이력 | 인증/소유권 |
+| GET | `/tasks/{id}/jobs` | 소유 작업의 렌더 이력 | 다른 기기에서 현재 버전 영상 재조회, 로컬 산출물 경로 비노출 |
 | GET | `/tasks/{id}` | 상태·진행률 | 인증/소유권 |
 | POST | `/tasks/{id}/approvals` | plan/draft/preview 중간 승인 증거 생성 | continue scope·현재 version/hash 서버 검증; 게시 최종 승인은 publication별 경로 사용 |
 | POST/GET | `/tasks/{id}/publications` | 플랫폼 게시 정보 생성/목록 조회 | 계정·공개범위·제목·설명·해시태그별 저장 |
@@ -177,7 +189,10 @@ Publishing uncertainty: publishing → outcome_unknown → reconciling
 ```
 
 ## 상태·동시성
-- `base_content_version`과 현재 버전이 다르면 `409 VERSION_CONFLICT`.
+- Creator `POST /tasks/{id}/plan`의 필수 `content_version`은 요청의 기준 버전이며 새 요청에서 현재 task 버전과 다르면 `409 VERSION_CONFLICT`입니다. 동일 멱등 키와 동일 요청의 재전송은 이전 결과를 반환합니다. `request_text`도 필수이며 성공 시 새 버전의 기획을 `201`로 반환합니다. 이전 초안의 `base_content_version`은 이 경로에서 같은 동시성 확인을 의도한 이름이지만 참조 구현에서 받지 않습니다.
+- 다른 제안 API에서 `base_content_version`을 명시한 경우에는 해당 경로의 계약을 따릅니다.
+- 자막·음악 편집은 새 콘텐츠 버전을 만들고 이전 승인과 체크포인트를 무효화합니다. 현 참조 모델은 새 버전의 plan 및 draft 중간 승인을 다시 요구합니다. 음원만 바뀌고 이전 실렌더가 유효하면 검증된 영상 스트림을 재사용하고 오디오만 다시 합성합니다.
+- `user_verified`는 사용자가 기록한 확인이며 공급자·플랫폼의 권리를 자동으로 보증하지 않습니다. 최종 게시 승인 시 음원 해시, 상업 이용, 대상 플랫폼, 출처·라이선스 버전·증빙·다운로드일과 필수 표기를 검사합니다. 나머지 원본·초상권·플랫폼 권리 게이트는 미완료입니다.
 - 렌더 작업과 게시 작업은 비동기, 폴링 혹은 SSE로 상태 수신.
 - 게시 결과 불명은 `outcome_unknown` 작업 상태이며 HTTP 오류 코드가 아닙니다. 공식 API 조정 전에는 재업로드하지 않습니다.
 - OAuth 연결은 외부 공급자별 redirect URI와 state/PKCE 검증.

@@ -1,5 +1,22 @@
 # `/api/v1` API 계약·보안 테스트 시나리오
 
+## 다중 미디어 업로드 확인 (2026-11-03)
+
+- 사진 5~10장, 영상 여러 개, 사진·영상 혼합을 직접 선택한 뒤 선언 순서와 완료 응답 순서가 같은지 확인합니다.
+- 한 파일 전송 후 완료 요청은 409, 같은 부분 재전송은 204, 해시가 다른 재전송은 409를 확인합니다.
+- 완료 manifest의 순서·SHA-256을 바꾸면 409가 나고 정상 파일은 그대로 남아야 합니다.
+- 다른 사용자 토큰으로 미디어를 프로젝트에 연결하면 404를 확인합니다.
+- PC 웹과 Android에서 선택 순서 변경·개별 제외·전체 취소, 재시도, 프로젝트 조회를 확인합니다. Android 실기기는 별도 검증이 필요합니다.
+- 기획 승인 후 장면 순서를 뒤집고 재생 초·영상 시작 위치를 바꾸면 버전이 1 증가하고 이전 승인 요청이 409를 반환하는지 확인합니다.
+- 장면 미디어 누락·중복, 목표 길이와 다른 합계, 사진의 영상 trim 요청은 422로 거부하는지 확인합니다.
+
+## PC·Android 공통 상태 조회 — 2026-11-03 추가
+
+- 인증 없이 `GET /content/projects`는 401, 다른 소유자 토큰으로는 빈 목록을 반환합니다. 본인 목록에는 로컬 파일 경로·소유자 내부 ID가 노출되지 않습니다.
+- `GET /tasks/{task_id}/jobs`는 본인 작업의 렌더 이력을 새 항목 우선으로 반환합니다. 타인 작업 ID는 404이며 산출물 로컬 경로를 반환하지 않습니다.
+- PC와 Android가 같은 작업을 조회한 뒤 한쪽이 기획·자막을 수정하면 다른 쪽의 구버전 승인·렌더 요청은 409로 거절되고 서버 최신 버전/해시/체크포인트를 다시 읽어야 합니다. 실제 두 기기 동시 E2E는 미검증입니다.
+- PC 웹은 직접 고른 파일만 업로드하고 토큰을 메모리에서만 사용합니다. 외부 AI 동의/호출 및 실제 SNS 게시 UI는 없습니다.
+
 > 상태: OpenAPI v0.5 수용 기준 **[승인 대기]**. 일부 보안·Creator 기본 흐름은 `backend/tests`에서 실행되며, 전체 시나리오의 테스트 구현/실행을 뜻하지 않습니다.
 > 계약 원본: [`openapi-v1.yaml`](openapi-v1.yaml) · 정책: [`09-API-CONTRACT.md`](09-API-CONTRACT.md) · 설명: [`API-GUIDE.md`](API-GUIDE.md)
 
@@ -27,6 +44,15 @@
 | SUP-05 | plan checkpoint 승인 전 caption draft 읽기 | `409 INVALID_STATE_TRANSITION`; 초안 비공개 |
 | SUP-06 | plan 승인 후 초안 읽기, draft 승인 전 렌더 | 초안 제공; 렌더 승인 조건은 계속 유지 |
 | SUP-07 | 기획 재수정 후 이전 plan/draft approval 사용 | content_version 증가, 과거 승인 invalidated, 구버전 승인 거부 |
+| SUP-08 | 새로운 기획 생성 요청에 오래된 `content_version` 사용 | `409 VERSION_CONFLICT`; 새 기획과 승인 상태 변경 없음. 동일 멱등 요청 재전송은 기존 결과 반환 |
+| SUP-09 | 기획 생성에 `request_text` 누락 또는 `base_content_version` 사용 | `422 VALIDATION_ERROR`; 기획 생성 없음 |
+| COMP-01 | plan 승인 뒤 자막·음악·음량 편집 | 새 버전/hash와 plan checkpoint 생성, 과거 승인 무효화; 새 plan/draft 승인 전 렌더 거부 |
+| COMP-02 | 본인 로컬 WAV/MP3 등록·업로드 | 크기/해시/signature 검사; 타 소유자 접근 거부, 검증 실패 시 등록 차단 |
+| COMP-03 | 권리 미확인 또는 대상 플랫폼 미허용 음원으로 최종 승인 | `403 RIGHTS_REVIEW_REQUIRED`; SNS 호출 0 |
+| COMP-04 | 음원 권리·증빙 수정 또는 확인 철회 | 권리 revision 증가, 해당 음원을 사용하는 최종 게시 승인 무효화 |
+| COMP-05 | 실제 FFmpeg에 한글 자막·합성 원음·합성 BGM 제공 | 안전 영역의 자막 픽셀, 두 음원의 주파수와 페이드, ffprobe 출력 규격 확인 |
+| COMP-06 | 기존 영상의 자막은 그대로 두고 오디오 설정만 변경 | 이전 검증 영상 비트스트림 재사용, 오디오 재합성, 새 승인 필수 |
+| COMP-07 | 음량이 0보다 큰 원본 영상 오디오의 권리가 미확인 | `403 RIGHTS_REVIEW_REQUIRED`; 대상 플랫폼별 확인과 필요한 표기 이후 승인 가능 |
 | LLM-01 | Gateway 기본 설정 또는 LLM enabled=false | 공급자 호출 0; local rules fallback |
 | LLM-02 | PrivacyGate에 검증된 명시 동의/allowlist 없음 | 외부 호출 0; `CONSENT_REQUIRED` fallback |
 | LLM-03 | Mock provider 테스트 | LLM Gateway만 호출; 실제 OpenAI/외부 요청 0 |

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { JsonState } from '../src/adapters/filesystem/json-state.js';
 import { LocalRepositories } from '../src/adapters/filesystem/repositories.js';
 import { createApiHandler } from '../src/adapters/node-http/transport.js';
@@ -14,6 +15,7 @@ import { PrivacyGate } from '../src/security/privacy-gate.js';
 import { corruptPngCrc, makeJpegStructure, makeMp4Structure, makePng, makeWebpStructure } from './media-fixtures.js';
 import { createRenderCoordinator } from '../src/application/render-coordinator.js';
 import { createTestRenderer } from '../src/media-engine/test-renderer.js';
+import { createFFmpegRenderer } from '../src/media-engine/ffmpeg-renderer.js';
 import { createDefaultCapabilityRegistry } from '../src/agents/capability-registry.js';
 import { SupervisorRouter } from '../src/agents/supervisor-router.js';
 import { CreatorAgent } from '../src/agents/creator-agent.js';
@@ -54,11 +56,100 @@ async function fixture(t, rendererFactory = null) {
 
 function headers(token = tokenA) { return { authorization: `Bearer ${token}` }; }
 
+test('mixed multi upload retains staged parts, validates ordered manifest, and creates one owner-scoped project', async (t) => {
+  const { base } = await fixture(t);
+  const types = [
+    { name: 'one.png', type: 'image/png', bytes: makePng() },
+    { name: 'two.mp4', type: 'video/mp4', bytes: makeMp4Structure() },
+    { name: 'three.jpg', type: 'image/jpeg', bytes: makeJpegStructure() },
+    { name: 'four.png', type: 'image/png', bytes: makePng() },
+    { name: 'five.png', type: 'image/png', bytes: makePng() },
+    { name: 'six.mp4', type: 'video/mp4', bytes: makeMp4Structure() },
+    { name: 'seven.png', type: 'image/png', bytes: makePng() },
+  ];
+  const manifest = types.map(({ bytes }) => ({ client_item_id: randomUUID(), sha256: digest(bytes), size_bytes: bytes.length }));
+  const items = types.map((item, index) => ({ client_item_id: manifest[index].client_item_id, file_name: item.name,
+    declared_media_type: item.type, size_bytes: item.bytes.length, sha256: manifest[index].sha256 }));
+  const json = { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'multi-init-key-0001' };
+  const initiated = await fetch(`${base}/media/uploads`, { method: 'POST', headers: json, body: JSON.stringify({ items }) });
+  assert.equal(initiated.status, 201, await initiated.clone().text());
+  const upload = await initiated.json();
+  assert.equal(upload.accepted_items.length, 7);
+  const retry = await fetch(`${base}/media/uploads`, { method: 'POST', headers: json, body: JSON.stringify({ items }) });
+  assert.equal((await retry.json()).upload_id, upload.upload_id);
+  const put = (index, bytes = types[index - 1].bytes) => fetch(`${base}/media/uploads/${upload.upload_id}/parts/${index}`, {
+    method: 'PUT', headers: { ...headers(), 'content-type': 'application/octet-stream', 'idempotency-key': `multi-part-key-000${index}` }, body: bytes });
+  assert.equal((await put(1)).status, 204);
+  const body = { manifest_sha256: digest(Buffer.from(JSON.stringify(manifest))), items: manifest };
+  const complete = () => fetch(`${base}/media/uploads/${upload.upload_id}/complete`, { method: 'POST',
+    headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'multi-complete-001' }, body: JSON.stringify(body) });
+  assert.equal((await complete()).status, 409);
+  assert.equal((await put(1)).status, 204);
+  assert.equal((await put(2, Buffer.alloc(types[1].bytes.length))).status, 409);
+  for (let index = 2; index <= 7; index++) assert.equal((await put(index)).status, 204);
+  const completed = await complete();
+  assert.equal(completed.status, 200);
+  const result = await completed.json();
+  assert.equal(result.media.length, 7);
+  assert.equal(result.manifest_sha256, body.manifest_sha256);
+  assert.deepEqual((await (await complete()).json()).media.map((entry) => entry.media_id), result.media.map((entry) => entry.media_id));
+  const projectResponse = await fetch(`${base}/content/projects`, { method: 'POST', headers: { ...json, 'idempotency-key': 'multi-project-001' },
+    body: JSON.stringify({ media_ids: result.media.map((entry) => entry.media_id) }) });
+  assert.equal(projectResponse.status, 201);
+  const project = await projectResponse.json();
+  assert.deepEqual(project.media_manifest.map((entry) => entry.sha256), manifest.map((entry) => entry.sha256));
+  const generatedResponse = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...json, 'idempotency-key': 'multi-plan-generate-0001' },
+    body: JSON.stringify({ content_version: 1, request_text: '선택한 다섯 장면으로 쇼츠를 만듭니다' }) });
+  assert.equal(generatedResponse.status, 201);
+  const generated = await generatedResponse.json();
+  const approve = await fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...json, 'idempotency-key': 'multi-plan-approve-0001' },
+    body: JSON.stringify({ checkpoint_id: generated.checkpoint.checkpoint_id, content_version: generated.content_version,
+      content_hash: generated.content_hash, approval_scope: 'continue' }) });
+  assert.equal(approve.status, 201);
+  const reversed = [...project.media_ids].reverse();
+  const sceneEdit = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'PUT', headers: { ...json, 'idempotency-key': 'multi-scene-edit-0001' },
+    body: JSON.stringify({ content_version: generated.content_version, content_hash: generated.content_hash,
+      scenes: reversed.map((media_id, index) => ({ media_id, duration_seconds: index === 0 ? 6 : 4,
+        ...(media_id === project.media_ids[1] ? { trim_start_seconds: 0.25 } : {}) })) }) });
+  assert.equal(sceneEdit.status, 200, await sceneEdit.clone().text());
+  const edited = await sceneEdit.json();
+  assert.equal(edited.content_version, generated.content_version + 1);
+  assert.deepEqual(edited.plan.scenes.map((scene) => scene.media_id), reversed);
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...json, 'idempotency-key': 'multi-stale-approve-0001' },
+    body: JSON.stringify({ checkpoint_id: generated.checkpoint.checkpoint_id, content_version: generated.content_version,
+      content_hash: generated.content_hash, approval_scope: 'continue' }) })).status, 409);
+  assert.equal((await fetch(`${base}/content/projects`, { method: 'POST', headers: { ...json, authorization: `Bearer ${tokenB}`, 'idempotency-key': 'multi-project-other-001' },
+    body: JSON.stringify({ media_ids: result.media.map((entry) => entry.media_id) }) })).status, 404);
+});
+
 test('auth is required before private API routes', async (t) => {
   const { base } = await fixture(t);
   const response = await fetch(`${base}/content/projects`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ media_ids: [] }) });
   assert.equal(response.status, 401);
   assert.equal((await response.json()).error.code, 'AUTHENTICATION_REQUIRED');
+});
+
+test('project list is authenticated, owner-scoped, and uses the shared server state', async (t) => {
+  const { base, repositories } = await fixture(t);
+  const first = await prepareUnapprovedProject(base, 9111);
+  const second = await prepareUnapprovedProject(base, 9112);
+  assert.equal((await fetch(`${base}/content/projects`)).status, 401);
+  const own = await fetch(`${base}/content/projects`, { headers: headers() });
+  assert.equal(own.status, 200);
+  const { items } = await own.json();
+  assert.deepEqual(items.map((item) => item.project_id), [second.project.project_id, first.project.project_id]);
+  assert.equal(items[0].ownerId, undefined);
+  const other = await fetch(`${base}/content/projects`, { headers: headers(tokenB) });
+  assert.deepEqual((await other.json()).items, []);
+  const jobId = randomUUID();
+  repositories.state.data.jobs[jobId] = { job_id: jobId, task_id: first.project.task_id, owner_id: 'owner-a', status: 'succeeded', artifact_key: 'private-file.mp4' };
+  repositories.state.save();
+  const ownJobs = await fetch(`${base}/tasks/${first.project.task_id}/jobs`, { headers: headers() });
+  const ownItems = (await ownJobs.json()).items;
+  assert.equal(ownItems[0].job_id, jobId);
+  assert.equal(ownItems[0].artifact_key, undefined);
+  assert.equal(ownItems[0].owner_id, undefined);
+  assert.equal((await fetch(`${base}/tasks/${first.project.task_id}/jobs`, { headers: headers(tokenB) })).status, 404);
 });
 
 test('privacy notice is disclosed, scoped consent is owner-bound, and revocation blocks verification', async (t) => {
@@ -497,11 +588,11 @@ test('write endpoints require idempotency keys', async (t) => {
   assert.equal((await missing.json()).error.code, 'VALIDATION_ERROR');
 });
 
-test('current upload contract rejects multi-item sessions, wrong part content type and part 2', async (t) => {
+test('multi-item sessions work while single upload still rejects wrong part content type and part 2', async (t) => {
   const { base } = await fixture(t);
   const item = { client_item_id: '33333333-3333-4333-8333-333333333333', file_name: 'selected.png', declared_media_type: 'image/png', size_bytes: png.length, sha256: digest(png) };
   const multi = await fetch(`${base}/media/uploads`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'multi-upload-init-0001' }, body: JSON.stringify({ items: [item, { ...item, client_item_id: '44444444-4444-4444-8444-444444444444' }] }) });
-  assert.equal(multi.status, 422);
+  assert.equal(multi.status, 201);
 
   const init = await fetch(`${base}/media/uploads`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'single-upload-init-0001' }, body: JSON.stringify({ items: [item] }) });
   const upload = await init.json();
@@ -561,4 +652,159 @@ test('PrivacyGate denies external processing before dispatch (zero calls)', asyn
   let calls = 0;
   await assert.rejects(() => gate.dispatchExternal({ ownerId: 'owner-a' }, async () => { calls += 1; }), { code: 'CONSENT_REQUIRED' });
   assert.equal(calls, 0);
+});
+
+test('caption and music edits version the task and unverified platform rights block final approval', async (t) => {
+  const { base, repositories } = await fixture(t);
+  const project = await prepareApprovedProject(base, 7788);
+  const wav = Buffer.alloc(44); wav.write('RIFF', 0); wav.write('WAVE', 8);
+  const rights = { source_url: '', license_name: '', license_version: '', license_url: '', evidence: '', downloaded_at: '', attribution_required: false, required_attribution: '', commercial_allowed: false, platforms: [], explicitly_verified: false };
+  const create = await fetch(`${base}/music/tracks`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'music-register-test-0001' }, body: JSON.stringify({ title: 'Synthetic test tone', artist: 'Test', format: 'wav', size_bytes: wav.length, sha256: digest(wav), rights }) });
+  assert.equal(create.status, 201);
+  const track = await create.json();
+  const foreign = await fetch(`${base}/music/tracks/${track.track_id}/content`, { method: 'PUT', headers: { ...headers(tokenB), 'content-type': 'application/octet-stream', 'idempotency-key': 'foreign-music-upload-0001' }, body: wav });
+  assert.equal(foreign.status, 404);
+  const wrongBytes = Buffer.from(wav); wrongBytes[20] = 1;
+  const tamperedUpload = await fetch(`${base}/music/tracks/${track.track_id}/content`, { method: 'PUT', headers: { ...headers(), 'content-type': 'application/octet-stream', 'idempotency-key': 'tampered-music-upload-001' }, body: wrongBytes });
+  assert.equal(tamperedUpload.status, 409);
+  const uploaded = await fetch(`${base}/music/tracks/${track.track_id}/content`, { method: 'PUT', headers: { ...headers(), 'content-type': 'application/octet-stream', 'idempotency-key': 'music-upload-test-0001' }, body: wav });
+  assert.equal(uploaded.status, 200);
+  assert.equal((await uploaded.json()).status, 'available');
+  assert.equal((await fetch(`${base}/music/tracks`, { headers: headers(tokenB) }).then((r) => r.json())).items.length, 0);
+
+  const edit = { content_version: project.current_version, content_hash: project.content_hash, captions: [{ order: 1, start_seconds: 0, end_seconds: 3, text: '안녕하세요' }], captions_enabled: true,
+    music_track_id: track.track_id, source_volume: 0.5, music_volume: 0.3, fade_in_seconds: 1, fade_out_seconds: 1 };
+  const editHeaders = { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'draft-edit-test-0001' };
+  const response = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: editHeaders, body: JSON.stringify(edit) });
+  assert.equal(response.status, 200);
+  const revised = await response.json();
+  assert.equal(revised.content_version, 2);
+  assert.notEqual(revised.content_hash, project.content_hash);
+  assert.ok(Object.values(repositories.state.data.approvals).filter((item) => item.task_id === project.task_id).every((item) => item.status === 'invalidated'));
+  const replay = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: editHeaders, body: JSON.stringify(edit) });
+  assert.equal((await replay.json()).content_hash, revised.content_hash);
+  const stale = await fetch(`${base}/tasks/${project.task_id}/render`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'old-version-render-0001' }, body: JSON.stringify({ content_version: 1, content_hash: project.content_hash }) });
+  assert.equal(stale.status, 409);
+
+  const approve = async (checkpoint, key) => fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id, content_version: checkpoint.content_version, content_hash: checkpoint.content_hash, approval_scope: 'continue' }) });
+  assert.equal((await approve(revised.checkpoint, 'edit-plan-approval-0001')).status, 201);
+  const draft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.equal(draft.captions[0].text, '안녕하세요');
+  assert.equal((await approve(draft.checkpoint, 'edit-draft-approval-0001')).status, 201);
+  const rendered = await fetch(`${base}/tasks/${project.task_id}/render`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'edited-draft-render-0001' }, body: JSON.stringify({ content_version: 2, content_hash: revised.content_hash }) });
+  assert.equal(rendered.status, 202);
+  assert.equal((await waitForJob(base, (await rendered.json()).job_id)).status, 'simulated');
+  const publication = await fetch(`${base}/tasks/${project.task_id}/publications`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'music-publication-test-01' }, body: JSON.stringify({ platform: 'youtube', account_id: 'test-account', visibility: 'private', title: 'test', description: '', hashtags: [] }) }).then((r) => r.json());
+
+  // Seed a verified artifact and preview approval to isolate the rights gate; no real SNS call is made.
+  const task = repositories.state.data.tasks[project.task_id];
+  repositories.state.data.jobs['test-real-job'] = { task_id: project.task_id, status: 'succeeded', renderer_mode: 'ffmpeg', artifact_verified: true, artifact_sha256: 'a'.repeat(64), content_version: 2, content_hash: revised.content_hash, source_audio_media_ids: [] };
+  repositories.state.data.checkpoints['test-preview'] = { task_id: project.task_id, kind: 'preview', status: 'approved', content_version: 2, content_hash: revised.content_hash, approval_id: 'test-preview-approval' };
+  repositories.state.data.approvals['test-preview-approval'] = { task_id: project.task_id, status: 'active', approval_scope: 'continue' };
+  task.status = 'preview_approved'; repositories.state.save();
+  const approvalBody = { content_version: 2, content_hash: revised.content_hash, artifact_sha256: 'a'.repeat(64), publication_revision: publication.revision, publication_hash: publication.metadata_hash };
+  const finalApproval = (key) => fetch(`${base}/tasks/${project.task_id}/publications/${publication.publication_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify(approvalBody) });
+  const blocked = await finalApproval('unverified-rights-test-001');
+  assert.equal(blocked.status, 403);
+  assert.equal((await blocked.json()).error.code, 'RIGHTS_REVIEW_REQUIRED');
+  const verified = { source_url: 'https://example.invalid/source', license_name: 'Test license', license_version: 'test-v1', license_url: 'https://example.invalid/license', evidence: 'Synthetic test evidence', downloaded_at: '2026-01-01', attribution_required: false, required_attribution: '', commercial_allowed: true, platforms: ['youtube'], explicitly_verified: true };
+  const updateRights = (revision, value, key) => fetch(`${base}/music/tracks/${track.track_id}/rights`, { method: 'PATCH', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify({ rights_revision: revision, rights: value }) });
+  const attributed = { ...verified, attribution_required: true, required_attribution: 'Test Artist' };
+  assert.equal((await updateRights(1, attributed, 'music-rights-verify-0001')).status, 200);
+  assert.throws(() => repositories.musicLibrary.assertPublishable('owner-a', track.track_id, 'instagram'), { code: 'RIGHTS_REVIEW_REQUIRED' });
+  assert.equal((await finalApproval('missing-attribution-test-01')).status, 403);
+  assert.equal((await updateRights(2, verified, 'music-rights-update-0001')).status, 200);
+  const storedAudio = join(repositories.musicLibrary.directory, `${track.track_id}.wav`);
+  writeFileSync(storedAudio, wrongBytes);
+  assert.equal((await finalApproval('changed-audio-rights-test-01')).status, 409);
+  writeFileSync(storedAudio, wav);
+  const syntheticSourceId = project.media_ids[0];
+  repositories.state.data.jobs['test-real-job'].source_audio_media_ids = [syntheticSourceId];
+  assert.equal((await finalApproval('unverified-original-test-01')).status, 403);
+  repositories.state.data.projects[project.project_id].composition.source_audio_rights = [{ media_id: syntheticSourceId, explicitly_verified: true, commercial_allowed: true, platforms: ['youtube'], evidence: 'Synthetic source proof', attribution_required: false, required_attribution: '' }];
+  const allowed = await finalApproval('verified-rights-test-0001');
+  assert.equal(allowed.status, 201);
+  const approval = await allowed.json();
+  assert.equal((await updateRights(3, rights, 'music-rights-revoke-0001')).status, 200);
+  assert.equal(repositories.state.data.approvals[approval.approval_id].status, 'invalidated');
+  assert.equal(repositories.state.data.publications[publication.publication_id].status, 'draft');
+  assert.equal((await finalApproval('verified-rights-test-0001')).status, 403);
+  repositories.state.data.projects[project.project_id].composition.source_audio_rights = [];
+  repositories.state.data.jobs['test-real-job'].source_audio_media_ids = [];
+  const cachedBytes = Buffer.from('synthetic cached video, used only by this mocked repository test');
+  const cachedName = 'cached-test.mp4';
+  writeFileSync(join(repositories.renderDir, cachedName), cachedBytes);
+  Object.assign(repositories.state.data.jobs['test-real-job'], { artifact_key: cachedName, artifact_sha256: digest(cachedBytes) });
+  const musicOnlyEdit = { ...edit, content_version: 2, content_hash: revised.content_hash, music_volume: 0.8 };
+  const musicOnly = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'music-only-edit-test-001' }, body: JSON.stringify(musicOnlyEdit) });
+  assert.equal(musicOnly.status, 200);
+  assert.equal((await musicOnly.json()).content_version, 3);
+  assert.equal(repositories.state.data.projects[project.project_id].video_reuse?.sha256, digest(cachedBytes));
+});
+
+test('real Creator API renders an approved Korean caption and selected local music and enforces rights', {
+  skip: !['ffmpeg', 'ffprobe'].every((command) => spawnSync(command, ['-version'], { stdio: 'ignore', windowsHide: true }).status === 0), timeout: 120000,
+}, async (t) => {
+  const { base, repositories, mockLLM } = await fixture(t, (repo) => createFFmpegRenderer({ mediaRoot: repo.blobDir, outputRoot: repo.renderDir }));
+  const sourcePath = join(repositories.dataDir, 'synthetic-source.mp4');
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '3', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-movflags', '+faststart', sourcePath], { windowsHide: true });
+  const sourceBytes = readFileSync(sourcePath); const sourceId = randomUUID(); const sourceHash = digest(sourceBytes);
+  const sourceInit = await fetch(`${base}/media/uploads`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-source-upload-init-001' }, body: JSON.stringify({ items: [{ client_item_id: sourceId, file_name: 'synthetic-source.mp4', declared_media_type: 'video/mp4', size_bytes: sourceBytes.length, sha256: sourceHash }] }) });
+  assert.equal(sourceInit.status, 201); const sourceUpload = await sourceInit.json();
+  assert.equal((await fetch(`${base}/media/uploads/${sourceUpload.upload_id}/parts/1`, { method: 'PUT', headers: { ...headers(), 'content-type': 'application/octet-stream', 'idempotency-key': 'real-source-upload-part-001' }, body: sourceBytes })).status, 204);
+  const sourceManifest = digest(Buffer.from(JSON.stringify([{ client_item_id: sourceId, sha256: sourceHash, size_bytes: sourceBytes.length }])));
+  const sourceComplete = await fetch(`${base}/media/uploads/${sourceUpload.upload_id}/complete`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-source-complete-key-01' }, body: JSON.stringify({ manifest_sha256: sourceManifest }) });
+  assert.equal(sourceComplete.status, 200); const mediaId = (await sourceComplete.json()).media[0].media_id;
+  const project = await fetch(`${base}/content/projects`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-composition-project-001' }, body: JSON.stringify({ media_ids: [mediaId], target_seconds: 3 }) }).then((r) => r.json());
+  const plan = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-composition-plan-0001' }, body: JSON.stringify({ content_version: 1, request_text: '합성 영상을 소개합니다' }) }).then((r) => r.json());
+  assert.equal(plan.generation.llm_calls, 0); assert.equal(mockLLM.calls, 0);
+  const approve = async (checkpoint, key) => fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id, content_version: checkpoint.content_version, content_hash: checkpoint.content_hash, approval_scope: 'continue' }) });
+  assert.equal((await approve(plan.checkpoint, 'real-initial-plan-approval-001')).status, 201);
+  const initialDraft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.ok(initialDraft.captions.length);
+  const audioPath = join(repositories.dataDir, 'synthetic-test-tone.wav');
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '3', '-c:a', 'pcm_s16le', audioPath], { windowsHide: true });
+  const audio = readFileSync(audioPath);
+  const rights = { source_url: '', license_name: '', license_version: '', license_url: '', evidence: '', downloaded_at: '', attribution_required: false, required_attribution: '', commercial_allowed: false, platforms: [], explicitly_verified: false };
+  const trackResponse = await fetch(`${base}/music/tracks`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-track-registration-001' }, body: JSON.stringify({ title: '합성 시험 음원', artist: 'test', format: 'wav', size_bytes: audio.length, sha256: digest(audio), rights }) });
+  assert.equal(trackResponse.status, 201); const track = await trackResponse.json();
+  assert.equal((await fetch(`${base}/music/tracks/${track.track_id}/content`, { method: 'PUT', headers: { ...headers(), 'content-type': 'application/octet-stream', 'idempotency-key': 'real-track-upload-key-0001' }, body: audio })).status, 200);
+  const edit = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-draft-edit-key-0001' }, body: JSON.stringify({ content_version: plan.content_version, content_hash: plan.content_hash, captions: [{ order: 1, start_seconds: 0, end_seconds: 3, text: '안녕하세요 합성 테스트입니다' }], captions_enabled: true, music_track_id: track.track_id, source_volume: 0.7, music_volume: 0.4, fade_in_seconds: 0.5, fade_out_seconds: 0.5 }) });
+  assert.equal(edit.status, 200); const revised = await edit.json();
+  assert.equal((await approve(revised.checkpoint, 'real-revised-plan-approval-01')).status, 201);
+  const draft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.equal((await approve(draft.checkpoint, 'real-revised-draft-approval-01')).status, 201);
+  const render = await fetch(`${base}/tasks/${project.task_id}/render`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-composition-render-0001' }, body: JSON.stringify({ content_version: revised.content_version, content_hash: revised.content_hash }) });
+  assert.equal(render.status, 202); const queued = await render.json();
+  let job;
+  for (let i = 0; i < 300; i++) { job = await fetch(`${base}/jobs/${queued.job_id}`, { headers: headers() }).then((r) => r.json()); if (['succeeded', 'failed', 'cancelled'].includes(job.status)) break; await new Promise((resolve) => setTimeout(resolve, 100)); }
+  assert.equal(job.status, 'succeeded', job.safe_error_code); assert.equal(job.renderer_mode, 'ffmpeg'); assert.equal(job.artifact_verified, true);
+  assert.deepEqual(job.source_audio_media_ids, [mediaId]);
+  const noAuth = await fetch(`${base}/tasks/${project.task_id}/preview?content_version=${revised.content_version}`); assert.equal(noAuth.status, 401);
+  const preview = await fetch(`${base}/tasks/${project.task_id}/preview?content_version=${revised.content_version}`, { headers: headers() });
+  assert.equal(preview.status, 200); assert.equal(preview.headers.get('content-type'), 'video/mp4'); assert.equal(preview.headers.get('x-haejumi-render-mode'), 'ffmpeg');
+  const checkpoints = await fetch(`${base}/tasks/${project.task_id}/checkpoints`, { headers: headers() }).then((r) => r.json());
+  assert.equal((await approve(checkpoints.items.find((item) => item.kind === 'preview' && item.status === 'pending'), 'real-preview-approval-0001')).status, 201);
+  const publication = await fetch(`${base}/tasks/${project.task_id}/publications`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-publication-create-001' }, body: JSON.stringify({ platform: 'youtube', account_id: 'test-account', visibility: 'private', title: 'test', description: '', hashtags: [] }) }).then((r) => r.json());
+  const final = await fetch(`${base}/tasks/${project.task_id}/publications/${publication.publication_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-unverified-approval-01' }, body: JSON.stringify({ content_version: revised.content_version, content_hash: revised.content_hash, artifact_sha256: job.artifact_sha256, publication_revision: publication.revision, publication_hash: publication.metadata_hash }) });
+  assert.equal(final.status, 403); assert.equal((await final.json()).error.code, 'RIGHTS_REVIEW_REQUIRED');
+  const verified = { source_url: 'https://example.invalid/source', license_name: 'Test license', license_version: 'v1', license_url: 'https://example.invalid/license', evidence: 'Synthetic test evidence', downloaded_at: '2026-01-01', attribution_required: false, required_attribution: '', commercial_allowed: true, platforms: ['youtube'], explicitly_verified: true };
+  assert.equal((await fetch(`${base}/music/tracks/${track.track_id}/rights`, { method: 'PATCH', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-track-rights-confirm-01' }, body: JSON.stringify({ rights_revision: 1, rights: verified }) })).status, 200);
+  const approvalInput = { content_version: revised.content_version, content_hash: revised.content_hash, artifact_sha256: job.artifact_sha256, publication_revision: publication.revision, publication_hash: publication.metadata_hash };
+  const missingOriginal = await fetch(`${base}/tasks/${project.task_id}/publications/${publication.publication_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-original-rights-block-01' }, body: JSON.stringify(approvalInput) });
+  assert.equal(missingOriginal.status, 403); assert.equal((await missingOriginal.json()).error.code, 'RIGHTS_REVIEW_REQUIRED');
+  const sourceRights = [{ media_id: mediaId, explicitly_verified: true, commercial_allowed: true, platforms: ['youtube'], evidence: 'Synthetic original audio', attribution_required: false, required_attribution: '' }];
+  const editRights = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-source-rights-edit-001' }, body: JSON.stringify({ content_version: revised.content_version, content_hash: revised.content_hash, captions: draft.captions, captions_enabled: true, music_track_id: track.track_id, source_volume: 0.7, music_volume: 0.4, fade_in_seconds: 0.5, fade_out_seconds: 0.5, source_audio_rights: sourceRights }) });
+  assert.equal(editRights.status, 200); const rightsVersion = await editRights.json();
+  assert.equal((await approve(rightsVersion.checkpoint, 'real-rights-plan-approval-001')).status, 201);
+  const rightsDraft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.equal((await approve(rightsDraft.checkpoint, 'real-rights-draft-approval-01')).status, 201);
+  const secondRender = await fetch(`${base}/tasks/${project.task_id}/render`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-rights-render-key-0001' }, body: JSON.stringify({ content_version: rightsVersion.content_version, content_hash: rightsVersion.content_hash }) });
+  assert.equal(secondRender.status, 202); const secondJobId = (await secondRender.json()).job_id;
+  let secondJob; for (let i = 0; i < 300; i++) { secondJob = await fetch(`${base}/jobs/${secondJobId}`, { headers: headers() }).then((r) => r.json()); if (['succeeded', 'failed', 'cancelled'].includes(secondJob.status)) break; await new Promise((resolve) => setTimeout(resolve, 100)); }
+  assert.equal(secondJob.status, 'succeeded', secondJob.safe_error_code); assert.equal(secondJob.video_reused, true); assert.deepEqual(secondJob.source_audio_media_ids, [mediaId]);
+  const secondCheckpoints = await fetch(`${base}/tasks/${project.task_id}/checkpoints`, { headers: headers() }).then((r) => r.json());
+  assert.equal((await approve(secondCheckpoints.items.find((item) => item.kind === 'preview' && item.status === 'pending'), 'real-rights-preview-approve-01')).status, 201);
+  const accepted = await fetch(`${base}/tasks/${project.task_id}/publications/${publication.publication_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'real-confirmed-rights-final-01' }, body: JSON.stringify({ content_version: rightsVersion.content_version, content_hash: rightsVersion.content_hash, artifact_sha256: secondJob.artifact_sha256, publication_revision: publication.revision, publication_hash: publication.metadata_hash }) });
+  assert.equal(accepted.status, 201); assert.equal(mockLLM.calls, 0);
 });

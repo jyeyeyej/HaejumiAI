@@ -1,12 +1,16 @@
-# 해주미 AI — Creator 우선 개발 scaffold
+# 해주미 AI — Creator 우선 개발
 
-이 저장소에는 개발 문서와 첫 Creator 참조 백엔드가 있습니다. 참조 백엔드는 선택 미디어 업로드·완료 검증, 업로드한 미디어 기반 프로젝트 생성, 작업 상태 조회만 제공합니다. SNS 게시, 외부 개인정보 전송, LLM 호출은 연결되어 있지 않습니다.
+> 2026-11-03 현재: Android Kotlin/Compose 앱과 Windows PC localhost React 웹이 같은 Node.js 참조 `/api/v1` 백엔드를 사용합니다. PC 웹 실행은 [`web/README.md`](web/README.md), Android 상태는 [`android/README.md`](android/README.md)를 참조하세요. Schedule·Wellness·Diary는 준비 중이며 실제 SNS 게시 기능은 없습니다.
+
+두 화면과 서버의 역할, 버전 충돌 처리, 후속 Agent 경계는 [`docs/PC-ANDROID-COMMON-ARCHITECTURE.md`](docs/PC-ANDROID-COMMON-ARCHITECTURE.md)에 정리했습니다.
+
+이 저장소에는 개발 문서, 교체 가능한 Node.js 참조 백엔드, Android 앱과 PC 웹 첫 버전이 있습니다. 참조 백엔드는 선택 미디어 업로드·검증, Creator 기획/자막·BGM 승인, FFmpeg 렌더와 인증된 미리보기를 제공합니다. 외부 LLM은 서버에서 기본 비활성화되며 명시 동의와 PrivacyGate 없이는 전송되지 않습니다. 실제 SNS 게시 연동은 없습니다.
 
 ## 로컬 테스트
 
-이미 설치된 Node.js 표준 라이브러리만 사용합니다. 패키지 설치 없이 `npm test`로 테스트할 수 있습니다. 서버는 시작할 때 루트 `.env`의 허용된 설정을 읽습니다. 실행 방법은 `backend/README.md`와 `.env.example`을 확인해 주세요.
+백엔드는 Node.js 표준 라이브러리로 동작하며 루트 `npm test`로 회귀 테스트를 실행합니다. PC 웹은 `web/`에서 `npm ci`, `npm run dev`, `npm test`, `npm run build`를 사용합니다. 서버는 시작할 때 루트 `.env`의 허용된 설정을 읽습니다. 실행 방법은 `backend/README.md`, `web/README.md`와 `.env.example`을 확인해 주세요.
 
-이 구현은 기술 선택이 승인되기 전의 교체 가능한 참조 어댑터입니다. 실제 개발 PC에서의 실행·배포 적합성은 확인되지 않았고, OpenAPI 정식 검증도 완료되지 않았습니다.
+Node.js는 장래 최종 백엔드 스택을 확정한 결정이 아닙니다. OpenAPI 3.1 문서는 Redocly 문법 검증을 통과했지만 전체 계약은 승인 대기이며, Android 실기기·사설 HTTPS 연결과 PC/Android 동시 사용은 아직 검증되지 않았습니다.
 
 1. `AGENTS.md`
 2. `docs/CODEX_HANDOFF_HAEJUMI.md` 및 `docs/DECISIONS.md`

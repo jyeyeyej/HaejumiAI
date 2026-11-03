@@ -45,8 +45,10 @@ function validPlan(value, project, media) {
     typeof value.plan.title_idea === 'string' && value.plan.title_idea.length <= 64 && value.plan.scenes.length === media.length &&
     value.plan.scenes.every((scene, index) => scene.order === index + 1 && scene.media_id === media[index].mediaId && scene.media_type === media[index].mediaType &&
       Number.isFinite(scene.start_seconds) && Number.isFinite(scene.end_seconds) && scene.start_seconds < scene.end_seconds &&
+      Math.abs(scene.start_seconds - (index ? value.plan.scenes[index - 1].end_seconds : 0)) <= 0.01 &&
       scene.start_seconds >= 0 && scene.end_seconds <= project.target_seconds && typeof scene.visual_direction === 'string' &&
       scene.visual_direction.length <= 500 && typeof scene.caption_text === 'string' && scene.caption_text.length <= 500) &&
+    Math.abs(value.plan.scenes.at(-1)?.end_seconds - project.target_seconds) <= 0.01 &&
     value.captions.length === media.length && value.captions.every((caption, index) => caption.order === index + 1 &&
       Number.isFinite(caption.start_seconds) && Number.isFinite(caption.end_seconds) && caption.start_seconds < caption.end_seconds &&
       caption.start_seconds >= 0 && caption.end_seconds <= project.target_seconds && typeof caption.text === 'string' && caption.text.length <= 500);

@@ -6,7 +6,7 @@ info:
     제안/승인 대기 중인 계약 초안입니다. Creator 우선이며 개인정보 외부 전송과
     SNS/외부 발행은 서버측 동의·권리·버전 승인 검증 없이는 실행할 수 없습니다.
   x-contract-status: proposal-pending-user-approval
-  x-validation-status: unverified-no-local-openapi-validator
+  x-validation-status: redocly-validated-with-warnings
   x-implementation-slice:
     status: proposed-pending-contract-approval
     notes:
@@ -17,7 +17,7 @@ info:
       - Multi-item chunk addressing, full codec decoding and final task linkage remain approval or verification items.
 servers:
   - url: /api/v1
-    description: Base path proposal; deployment origin and TLS remain undecided.
+    description: Shared base path; PC browser uses a 127.0.0.1 proxy, while Android's private HTTPS route remains unverified.
 tags:
   - name: Auth
   - name: Privacy
@@ -62,7 +62,7 @@ x-external-egress-policy:
   status: proposal-pending-user-approval
   invariant: All outbound network calls are dispatched through a backend-controlled egress broker; agents and LLMs have no direct network access.
   processor-calls: Require PrivacyGate consent as defined in x-privacy-gate; absent/revoked/invalid consent means zero outbound requests.
-  publication-calls: Require the distinct Publish Gate: exact active final_publish approval, current version/hash, account/visibility/caption binding and RightsDecision=ALLOW. Missing checks mean zero platform requests.
+  publication-calls: "Require the distinct Publish Gate: exact active final_publish approval, current version/hash, account/visibility/caption binding and RightsDecision=ALLOW. Missing checks mean zero platform requests."
   separation: A publish approval never authorizes processor calls; a processor consent never authorizes SNS publication.
 x-content-version-policy:
   status: proposal-pending-user-approval
@@ -314,6 +314,30 @@ paths:
         '503': { $ref: '#/components/responses/Unavailable' }
         default: { $ref: '#/components/responses/Error' }
   /tasks/{task_id}/plan:
+    put:
+      tags: [Tasks]
+      operationId: updateCreatorSceneTimeline
+      summary: Reorder selected media and adjust scene durations or selected video start positions
+      description: Uses the current content version and hash. The media IDs must be the same owned project items exactly once; durations must sum to target_seconds. A successful edit increments the content version and invalidates affected approvals.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatorSceneEditRequest' }
+      responses:
+        '200':
+          description: Updated storyboard and pending plan checkpoint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatorPlanResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
     get:
       tags: [Tasks]
       operationId: getCreatorPlan
@@ -350,9 +374,13 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CreatorPlanResult' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Proposed policy or scope denial; the current single-owner reference adapter returns 404 for another owner's task.
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
         default: { $ref: '#/components/responses/Error' }
   /tasks/{task_id}/draft:
     get:
@@ -370,6 +398,126 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Tasks]
+      operationId: reviseCreatorComposition
+      summary: Revise captions, selected local music and audio settings
+      description: Creates a new version and invalidates earlier approvals; the user must reapprove the plan and draft. Audio-only changes can reuse a previously verified video bitstream. Selected music must be an owned, uploaded library track; unverified rights permit private preview only.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatorDraftEdit' }
+      responses:
+        '200':
+          description: New version and pending plan checkpoint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatorDraftEditResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /music/tracks:
+    get:
+      tags: [Media]
+      operationId: listLocalMusicTracks
+      summary: List the authenticated owner's local music registrations
+      responses:
+        '200':
+          description: Owner-scoped music metadata and user-attested rights
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/MusicTrack' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Media]
+      operationId: registerLocalMusicTrack
+      summary: Register a user-selected local music file and rights evidence
+      description: Creates metadata only; the user must separately upload the WAV or MP3 bytes. A user rights assertion is not an independent legal verification.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MusicTrackCreate' }
+      responses:
+        '201':
+          description: Music registration awaiting its file
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MusicTrack' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /music/tracks/{track_id}/content:
+    put:
+      tags: [Media]
+      operationId: uploadLocalMusicTrack
+      summary: Upload only the selected music bytes to the owner's local library
+      description: Size, declared SHA-256 and WAV/MP3 signature must match. Full decoding occurs during rendering; this signature check is not malware detection.
+      parameters:
+        - { in: path, name: track_id, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Uploaded track metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MusicTrack' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMedia' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
+  /music/tracks/{track_id}/rights:
+    patch:
+      tags: [Media, Rights]
+      operationId: updateLocalMusicRights
+      summary: Update user-attested rights and invalidate affected final approvals
+      parameters:
+        - { in: path, name: track_id, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [rights_revision, rights]
+              properties:
+                rights_revision: { type: integer, minimum: 1 }
+                rights: { $ref: '#/components/schemas/MusicRights' }
+      responses:
+        '200':
+          description: Updated track and incremented rights revision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MusicTrack' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
   /media/uploads:
     post:
@@ -411,8 +559,8 @@ paths:
         - name: part_number
           in: path
           required: true
-          description: Current adapter supports only part 1; resumable chunk rules are pending approval.
-          schema: { type: integer, minimum: 1, maximum: 1 }
+          description: For multi-item sessions this is the 1-based item position. Single-item sessions still accept only part 1. Each file is sent in one part.
+          schema: { type: integer, minimum: 1, maximum: 30 }
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -474,6 +622,25 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
   /content/projects:
+    get:
+      tags: [Projects]
+      operationId: listContentProjects
+      summary: List the authenticated owner's Creator projects
+      description: Reference adapter response for the Android and localhost PC clients; no other owner's projects or local storage paths are returned.
+      responses:
+        '200':
+          description: Owned projects, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ContentProject' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
     post:
       tags: [Projects]
       operationId: createContentProject
@@ -588,36 +755,6 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
-  /tasks/{task_id}/plan:
-    post:
-      tags: [Tasks]
-      operationId: createTaskPlan
-      summary: Generate or retrieve a plan for review
-      parameters:
-        - $ref: '#/components/parameters/TaskId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [base_content_version]
-              properties:
-                base_content_version: { type: integer, minimum: 1 }
-      responses:
-        '200':
-          description: Plan generated; requires a plan checkpoint decision
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Task' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/ValidationError' }
-        default: { $ref: '#/components/responses/Error' }
   /tasks/{task_id}/checkpoints:
     get:
       tags: [Approvals]
@@ -637,6 +774,28 @@ paths:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/Checkpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/jobs:
+    get:
+      tags: [Rendering]
+      operationId: listTaskRenderJobs
+      summary: List an owned task's render jobs for cross-device resume
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Render jobs, newest first, without local artifact paths
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Job' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
@@ -793,7 +952,7 @@ paths:
       tags: [Publishing, Approvals]
       operationId: approvePublicationTarget
       summary: Explicitly approve one exact platform publication target
-      description: Requires a current ffprobe-verified real FFmpeg artifact and an approved preview. Binds task version/hash, artifact hash, publication revision/hash, platform, account, visibility and text. Approval only changes metadata state to publish_ready; no SNS API call or post is implemented.
+      description: Requires a current ffprobe-verified real FFmpeg artifact and an approved preview. Selected music and any audible source-video audio require explicit user rights verification, commercial permission, evidence, platform permission and required attribution in the publication description. Binds task version/hash, artifact hash, publication revision/hash, platform, account, visibility and text. Approval only changes metadata state to publish_ready; no SNS API call or post is implemented. Other asset rights checks remain incomplete.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/PublicationId'
@@ -810,6 +969,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PublicationApproval' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/ValidationError' }
@@ -1245,9 +1405,28 @@ components:
       additionalProperties: false
       required: [content_version, request_text]
       properties:
-        content_version: { type: integer, minimum: 1 }
+        content_version: { type: integer, minimum: 1, description: Current task version used as the concurrency precondition; stale versions on new requests are rejected with 409. An identical idempotent replay returns its recorded result. }
         request_text: { type: string, minLength: 1, maxLength: 4000 }
         privacy_consent_id: { type: string, format: uuid, description: Optional owner-bound consent for OpenAI vision analysis. }
+    CreatorSceneEditRequest:
+      type: object
+      additionalProperties: false
+      required: [content_version, content_hash, scenes]
+      properties:
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        scenes:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items:
+            type: object
+            additionalProperties: false
+            required: [media_id, duration_seconds]
+            properties:
+              media_id: { type: string, format: uuid }
+              duration_seconds: { type: number, minimum: 0.1, maximum: 59 }
+              trim_start_seconds: { type: number, minimum: 0, maximum: 3600, description: Video only; seek from this source position before rendering. }
     CreatorPlanResult:
       type: object
       additionalProperties: false
@@ -1280,12 +1459,13 @@ components:
               media_type: { type: string, enum: [image/jpeg, image/png, image/webp, video/mp4, video/quicktime] }
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
+              trim_start_seconds: { type: number, minimum: 0, maximum: 3600 }
               visual_direction: { type: string, maxLength: 500 }
               caption_text: { type: string, maxLength: 500 }
     CreatorDraft:
       type: object
       additionalProperties: false
-      required: [task_id, content_version, content_hash, captions, checkpoint]
+      required: [task_id, content_version, content_hash, captions, composition, checkpoint]
       properties:
         task_id: { type: string, format: uuid }
         content_version: { type: integer, minimum: 1 }
@@ -1301,7 +1481,114 @@ components:
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
               text: { type: string, maxLength: 500 }
+        composition:
+          anyOf:
+            - { $ref: '#/components/schemas/CreatorComposition' }
+            - { type: 'null' }
         checkpoint: { $ref: '#/components/schemas/Checkpoint' }
+    CreatorComposition:
+      type: object
+      additionalProperties: false
+      required: [captions_enabled, music_track_id, source_volume, music_volume, fade_in_seconds, fade_out_seconds]
+      properties:
+        captions_enabled: { type: boolean }
+        music_track_id: { type: [string, 'null'], format: uuid }
+        source_volume: { type: number, minimum: 0, maximum: 2 }
+        music_volume: { type: number, minimum: 0, maximum: 2 }
+        fade_in_seconds: { type: number, minimum: 0, maximum: 10, description: Must not exceed half the project duration. }
+        fade_out_seconds: { type: number, minimum: 0, maximum: 10, description: Must not exceed half the project duration. }
+        source_audio_rights: { type: array, maxItems: 30, items: { $ref: '#/components/schemas/SourceAudioRight' } }
+    CreatorDraftEdit:
+      type: object
+      additionalProperties: false
+      required: [content_version, content_hash, captions, captions_enabled, music_track_id, source_volume, music_volume, fade_in_seconds, fade_out_seconds]
+      properties:
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        captions:
+          type: array
+          maxItems: 30
+          items:
+            type: object
+            additionalProperties: false
+            required: [order, start_seconds, end_seconds, text]
+            properties:
+              order: { type: integer, minimum: 1, description: Must match its one-based array position. }
+              start_seconds: { type: number, minimum: 0 }
+              end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59, description: Must be after start and at most the project duration. }
+              text: { type: string, maxLength: 80, description: 'Korean, supported ASCII and selected punctuation; control characters and unsupported glyphs are rejected.' }
+        captions_enabled: { type: boolean }
+        music_track_id: { type: [string, 'null'], format: uuid }
+        source_volume: { type: number, minimum: 0, maximum: 2 }
+        music_volume: { type: number, minimum: 0, maximum: 2 }
+        fade_in_seconds: { type: number, minimum: 0, maximum: 10 }
+        fade_out_seconds: { type: number, minimum: 0, maximum: 10 }
+        source_audio_rights: { type: array, maxItems: 30, items: { $ref: '#/components/schemas/SourceAudioRight' }, description: Optional per-video rights assertions; omitted preserves existing assertions. }
+    SourceAudioRight:
+      type: object
+      additionalProperties: false
+      required: [media_id, explicitly_verified, commercial_allowed, platforms, evidence, attribution_required, required_attribution]
+      description: User-attested rights for source video audio; the media ID must belong to the project. Audible source audio without valid platform-specific rights blocks final approval.
+      properties:
+        media_id: { type: string, format: uuid }
+        explicitly_verified: { type: boolean }
+        commercial_allowed: { type: boolean }
+        platforms: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/PublishPlatform' } }
+        evidence: { type: string, maxLength: 4000 }
+        attribution_required: { type: boolean }
+        required_attribution: { type: string, maxLength: 2000 }
+    CreatorDraftEditResult:
+      type: object
+      additionalProperties: false
+      required: [task_id, content_version, content_hash, checkpoint]
+      properties:
+        task_id: { type: string, format: uuid }
+        content_version: { type: integer, minimum: 1 }
+        content_hash: { $ref: '#/components/schemas/Sha256' }
+        checkpoint: { $ref: '#/components/schemas/Checkpoint' }
+    MusicRights:
+      type: object
+      additionalProperties: false
+      required: [source_url, license_name, license_version, license_url, evidence, downloaded_at, attribution_required, required_attribution, commercial_allowed, platforms, explicitly_verified]
+      description: User-attested evidence; explicit verification requires nonempty source, license name/version/URL, evidence, download date, commercial permission and at least one permitted platform. Attribution, when required, must appear in the publication description.
+      properties:
+        source_url: { type: string, maxLength: 2000 }
+        license_name: { type: string, maxLength: 300 }
+        license_version: { type: string, maxLength: 200 }
+        license_url: { type: string, maxLength: 2000 }
+        evidence: { type: string, maxLength: 4000 }
+        downloaded_at: { type: string, description: YYYY-MM-DD or empty while unverified. }
+        attribution_required: { type: boolean }
+        required_attribution: { type: string, maxLength: 2000 }
+        commercial_allowed: { type: boolean }
+        platforms: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/PublishPlatform' } }
+        explicitly_verified: { type: boolean }
+    MusicTrackCreate:
+      type: object
+      additionalProperties: false
+      required: [title, artist, format, size_bytes, sha256, rights]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        artist: { type: string, minLength: 1, maxLength: 200 }
+        format: { type: string, enum: [wav, mp3] }
+        size_bytes: { type: integer, minimum: 1 }
+        sha256: { $ref: '#/components/schemas/Sha256' }
+        rights: { $ref: '#/components/schemas/MusicRights' }
+    MusicTrack:
+      type: object
+      additionalProperties: false
+      required: [track_id, title, artist, format, size_bytes, sha256, rights, rights_revision, rights_status, status]
+      properties:
+        track_id: { type: string, format: uuid }
+        title: { type: string }
+        artist: { type: string }
+        format: { type: string, enum: [wav, mp3] }
+        size_bytes: { type: integer, minimum: 1 }
+        sha256: { $ref: '#/components/schemas/Sha256' }
+        rights: { $ref: '#/components/schemas/MusicRights' }
+        rights_revision: { type: integer, minimum: 1 }
+        rights_status: { type: string, enum: [unverified, user_verified] }
+        status: { type: string, enum: [awaiting_upload, available] }
     GenerationMetadata:
       type: object
       additionalProperties: false
@@ -1330,7 +1617,7 @@ components:
         items:
           type: array
           minItems: 1
-          maxItems: 1
+          maxItems: 30
           items:
             type: object
             additionalProperties: false
@@ -1361,16 +1648,19 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        Current one-item adapter hashes UTF-8 bytes of compact JSON for an array with
-        exactly one object in this field order: client_item_id (lowercase UUID),
+        The adapter hashes UTF-8 bytes of compact JSON for an ordered array with
+        each object in this field order: client_item_id (lowercase UUID),
         sha256 (lowercase hex) and size_bytes (integer). This canonicalization is
-        provisional and remains pending API approval. If items is provided it must
-        match the upload session exactly.
+        provisional and remains pending API approval. For multi-item sessions items
+        is required and must match the upload session exactly. Single-item sessions
+        may omit items for backward compatibility.
       required: [manifest_sha256]
       properties:
         manifest_sha256: { allOf: [{ $ref: '#/components/schemas/Sha256' }], description: SHA-256 of the provisional canonical manifest described above. }
         items:
           type: array
+          minItems: 1
+          maxItems: 30
           items:
             type: object
             required: [client_item_id, sha256, size_bytes]
@@ -1410,7 +1700,7 @@ components:
       additionalProperties: false
       required: [media_ids]
       properties:
-        media_ids: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+        media_ids: { type: array, minItems: 1, maxItems: 30, uniqueItems: true, items: { type: string, format: uuid }, description: Default server limit is 20; configurable up to 30. }
         style: { type: string, maxLength: 80 }
         target_seconds: { type: integer, minimum: 3, maximum: 59, default: 30, description: Desired video duration in seconds; accepted range is 3 through 59 (60 is excluded). }
         aspect_ratio: { type: string, const: '9:16' }
@@ -1428,6 +1718,17 @@ components:
         current_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         media_ids: { type: array, items: { type: string, format: uuid } }
+        media_manifest:
+          type: array
+          description: Server-verified selected media in project order. Older projects may omit this field.
+          items:
+            type: object
+            additionalProperties: false
+            required: [order, media_id, sha256]
+            properties:
+              order: { type: integer, minimum: 1 }
+              media_id: { type: string, format: uuid }
+              sha256: { $ref: '#/components/schemas/Sha256' }
         style: { type: string, maxLength: 80 }
         target_seconds: { type: integer, minimum: 3, maximum: 59 }
         aspect_ratio: { type: string, const: '9:16' }
@@ -1526,6 +1827,8 @@ components:
         content_hash: { $ref: '#/components/schemas/Sha256' }
         artifact_sha256: { $ref: '#/components/schemas/Sha256' }
         renderer_mode: { type: string, enum: [ffmpeg, test] }
+        video_reused: { type: boolean, description: Previously verified video stream was reused for an audio-only change. }
+        source_audio_media_ids: { type: array, items: { type: string, format: uuid }, description: Source video IDs for which ffprobe detected an audio stream. }
         artifact_verified: { type: boolean }
         preview_ready: { type: boolean }
         render_profile: { type: string, enum: [vertical_9_16_h264_aac] }

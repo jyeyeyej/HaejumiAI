@@ -33,6 +33,8 @@ if (!ownerId) throw new Error('Set HAEJUMI_OWNER_ID before starting the server.'
 const dataDir = ensureStorageDirectory(resolve(process.env.HAEJUMI_DATA_DIR || './data'));
 const maxMediaBytes = Number(process.env.HAEJUMI_MAX_MEDIA_BYTES || 52_428_800);
 if (!Number.isSafeInteger(maxMediaBytes) || maxMediaBytes < 1) throw new Error('Invalid HAEJUMI_MAX_MEDIA_BYTES.');
+const maxSelectedMedia = parseInteger(process.env.HAEJUMI_MAX_SELECTED_MEDIA, 20);
+if (maxSelectedMedia < 1 || maxSelectedMedia > 30) throw new Error('Invalid HAEJUMI_MAX_SELECTED_MEDIA.');
 const maxVisionImages = parseInteger(process.env.HAEJUMI_OPENAI_MAX_IMAGES_PER_ANALYSIS, 5);
 if (maxVisionImages < 1 || maxVisionImages > 20) throw new Error('Invalid HAEJUMI_OPENAI_MAX_IMAGES_PER_ANALYSIS.');
 const llmEnabled = parseBoolean(process.env.HAEJUMI_LLM_ENABLED, false);
@@ -44,7 +46,7 @@ const openAiProvider = llmEnabled && openAiKey && openAiModel ? new OpenAIProvid
   estimatedCostUsd: parseNumber(process.env.HAEJUMI_LLM_ESTIMATED_COST_PER_ITEM_USD, 0.01) }) : null;
 
 const state = new JsonState(safeStoragePath(dataDir, 'state.json'));
-const repositories = new LocalRepositories({ state, dataDir, maxMediaBytes, maxVisionImages,
+const repositories = new LocalRepositories({ state, dataDir, maxMediaBytes, maxSelectedMedia, maxVisionImages,
   videoFrameExtractor: openAiProvider ? createFFmpegFrameExtractor() : null, imagePreparer: openAiProvider ? createFFmpegImagePreparer() : null });
 const privacyGate = new PrivacyGate({ enabled: Boolean(llmEnabled && openAiProvider), providerAllowlist: openAiProvider ? ['openai'] : [],
   consentVerifier: (context) => repositories.verifyPrivacyConsent(context) });

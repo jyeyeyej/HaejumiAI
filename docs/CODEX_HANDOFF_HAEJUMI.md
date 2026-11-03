@@ -1,5 +1,7 @@
 # Codex 개발 전달서 — 해주미 AI (Haejumi)
 
+> **2026-11-03 사용자 확정 후속:** Android Kotlin/Compose와 Windows PC localhost React 웹이 같은 Node.js 참조 `/api/v1` 및 서버 데이터를 사용합니다. PC 웹은 직접 고른 파일만 업로드합니다. Schedule·Wellness·Diary는 기능 구현 전 준비 중으로 표시하고, Android 사설 HTTPS 연결은 실제 기기 검증 전입니다. 아래의 과거 FastAPI·PC UI 선택 문구는 최신 확정 결정을 대체하지 않습니다. 상세 이력은 `docs/DECISIONS.md` D123~D125를 참조합니다.
+
 > 기준일: 2026-10-30  
 > 목적: 지금까지 사용자와 합의한 요구사항을 Codex가 누락 없이 개발할 수 있도록 전달하는 **최신 실행 지시서**  
 > 대상: 개인용 Android 중심 멀티 에이전트 비서 / 상업용 크리에이터 콘텐츠 제작 도우미  

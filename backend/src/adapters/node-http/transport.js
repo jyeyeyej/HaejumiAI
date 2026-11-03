@@ -12,6 +12,23 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
       if (!principal) return sendError(response, 401, 'AUTHENTICATION_REQUIRED');
       const path = url.pathname.slice(API_PREFIX.length);
 
+      if (path === '/music/tracks' && request.method === 'GET') return sendJson(response, 200, repositories.musicLibrary.list(principal.ownerId));
+      if (path === '/music/tracks' && request.method === 'POST') {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 201, repositories.musicLibrary.create(principal.ownerId, await readJson(request), request.headers['idempotency-key']));
+      }
+      let musicMatch = /^\/music\/tracks\/([0-9a-f-]+)\/content$/.exec(path);
+      if (musicMatch && request.method === 'PUT') {
+        if (request.headers['content-type'] !== 'application/octet-stream') return sendError(response, 415, 'UNSUPPORTED_MEDIA_TYPE');
+        requireIdempotencyKey(request);
+        return sendJson(response, 200, repositories.musicLibrary.upload(principal.ownerId, musicMatch[1], await readBytes(request, maxMediaBytes), request.headers['idempotency-key']));
+      }
+      musicMatch = /^\/music\/tracks\/([0-9a-f-]+)\/rights$/.exec(path);
+      if (musicMatch && request.method === 'PATCH') {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 200, repositories.musicLibrary.updateRights(principal.ownerId, musicMatch[1], await readJson(request), request.headers['idempotency-key']));
+      }
+
       if (request.method === 'GET' && path === '/privacy/processing-notice') {
         const purpose = url.searchParams.get('purpose');
         const categories = purpose === 'vision_analysis' ? ['selected_media', 'user_text'] : purpose === 'llm_text' ? ['user_text'] : null;
@@ -112,6 +129,9 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
         return sendJson(response, 200, repositories.completeUpload(principal.ownerId, match[1], body, request.headers['idempotency-key']));
       }
 
+      if (request.method === 'GET' && path === '/content/projects') {
+        return sendJson(response, 200, { items: repositories.listOwnedProjects(principal.ownerId) });
+      }
       if (request.method === 'POST' && path === '/content/projects') {
         requireJson(request);
         requireIdempotencyKey(request);
@@ -134,6 +154,10 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
         const body = await readJson(request);
         return sendJson(response, 201, await repositories.createCreatorPlan(principal.ownerId, match[1], body, request.headers['idempotency-key'], creatorAgent));
       }
+      if (request.method === 'PUT' && match) {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 200, repositories.updateCreatorScenes(principal.ownerId, match[1], await readJson(request), request.headers['idempotency-key']));
+      }
 
       match = /^\/tasks\/([0-9a-f-]+)\/draft$/.exec(path);
       if (request.method === 'GET' && match) {
@@ -141,12 +165,23 @@ export function createApiHandler({ repositories, auth, maxMediaBytes, renderCoor
         if (!draft) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
         return sendJson(response, 200, draft);
       }
+      if (request.method === 'PATCH' && match) {
+        requireJson(request); requireIdempotencyKey(request);
+        return sendJson(response, 200, repositories.updateCaptionDraft(principal.ownerId, match[1], await readJson(request), request.headers['idempotency-key']));
+      }
 
       match = /^\/tasks\/([0-9a-f-]+)\/checkpoints$/.exec(path);
       if (request.method === 'GET' && match) {
         const checkpoints = repositories.getOwnedCheckpoints(principal.ownerId, match[1]);
         if (!checkpoints) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
         return sendJson(response, 200, { items: checkpoints });
+      }
+
+      match = /^\/tasks\/([0-9a-f-]+)\/jobs$/.exec(path);
+      if (request.method === 'GET' && match) {
+        const items = repositories.listOwnedTaskJobs(principal.ownerId, match[1]);
+        if (!items) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        return sendJson(response, 200, { items });
       }
 
       match = /^\/tasks\/([0-9a-f-]+)\/approvals$/.exec(path);
@@ -301,6 +336,7 @@ const SAFE_MESSAGES = {
   PUBLICATION_ALREADY_EXISTS: '해당 플랫폼 게시 정보가 이미 있습니다.', RENDER_REQUIRED: '실제 FFmpeg 및 ffprobe 검증이 완료된 영상이 필요합니다.',
   SERVICE_UNAVAILABLE: '요청을 처리할 수 없습니다.', TRANSCRIPT_CONFIRMATION_REQUIRED: '음성 인식문을 확인하고 수정한 뒤 다시 요청해 주세요.',
   LLM_BUDGET_EXCEEDED: 'LLM 사용 한도에 도달했습니다. 로컬 처리로 전환합니다.',
+  RIGHTS_REVIEW_REQUIRED: '음원의 상업 이용 및 대상 플랫폼 권리를 확인해 주세요.',
 };
 
 function routeReply(route) {

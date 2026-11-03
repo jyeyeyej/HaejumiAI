@@ -1,5 +1,9 @@
 # 해주미 AI 실전 개발계획서 v1.1
 
+## 2026-11-03 다중 미디어 구현 진행
+
+Creator의 사진·영상 혼합 선택 기본 상한을 20개로 두고, 백엔드는 `HAEJUMI_MAX_SELECTED_MEDIA`, 웹은 `VITE_MAX_SELECTED_MEDIA`, Android는 Gradle 속성 `haejumi.maxSelectedMedia`로 1~30개를 설정합니다. 세 값은 배포 시 동일하게 맞춰야 합니다. 프로젝트의 ordered `media_ids`와 SHA-256 manifest를 단일 데이터 원천으로 사용합니다. PC 웹은 다중 업로드 세션을 사용하며 Android는 기존 파일별 업로드 API로 여러 파일을 같은 프로젝트에 연결합니다. 장면별 길이·순서·영상 시작 위치 편집은 버전과 승인을 갱신하며 서버 렌더 타임라인에 반영합니다. 영상 종료 위치 지정과 두 클라이언트의 공통 설정 자동 전달은 후속 작업입니다.
+
 > 2026-10-30 · 상태: **제안/착수 전** · 근거: `docs/CODEX_HANDOFF_HAEJUMI.md`, `docs/01-PRD.md`~`docs/26-EXTENSIBILITY.md`, `docs/DECISIONS.md`.
 > 제품 확정 기능은 바꾸지 않습니다. 기술, 세부 API 및 추정 일정은 승인 전까지 [제안]입니다.
 

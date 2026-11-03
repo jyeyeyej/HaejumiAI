@@ -1,5 +1,11 @@
 # 해주미 `/api/v1` API 초보자 안내서
 
+## 다중 선택 업로드 (2026-11-03)
+
+사용자가 직접 선택한 사진·영상만 `POST /api/v1/media/uploads`의 `items` 배열에 순서대로 선언합니다. 기본 상한은 20개이며 서버 설정 `HAEJUMI_MAX_SELECTED_MEDIA`로 1~30개 사이에서 변경할 수 있습니다. 여러 항목이면 `PUT /media/uploads/{upload_id}/parts/{part_number}`의 번호가 1부터 시작하는 파일 순서입니다. 파일마다 한 조각으로 전송하며 각 요청은 별도 멱등 키를 사용합니다. 완료 요청에는 순서대로 정렬한 `items`와 canonical JSON SHA-256인 `manifest_sha256`을 함께 보냅니다. 단일 항목 완료 요청은 기존처럼 `items`를 생략할 수 있습니다. 완료 응답의 `media` 순서대로 `media_ids`를 프로젝트 생성 요청에 넣습니다. 프로젝트 조회의 `media_manifest`에는 순서·media_id·검증된 SHA-256이 기록됩니다. 부분 전송 실패 후 같은 세션과 멱등 키로 재시도할 수 있습니다.
+
+기획이 생성된 후 `PUT /api/v1/tasks/{task_id}/plan`에 현재 `content_version`, `content_hash`, `scenes`를 보낼 수 있습니다. 각 scene은 `media_id`, `duration_seconds`, 영상인 경우 선택적인 `trim_start_seconds`를 담습니다. 모든 미디어 ID는 한 번씩 들어가야 하며 길이 합은 프로젝트 목표 초와 같아야 합니다. 저장하면 새 버전과 대기 중인 기획 체크포인트가 생성되고 이전 승인이 무효화됩니다. 렌더는 이 순서·시간·영상 시작 위치를 사용합니다.
+
 > 상태: OpenAPI 3.1 계약 v0.5 **[제안/승인 대기]**  
 > 사양 원본: [`openapi-v1.yaml`](openapi-v1.yaml)  
 > 경로·상태·오류 기준: [`09-API-CONTRACT.md`](09-API-CONTRACT.md)
@@ -31,7 +37,7 @@ API는 Android 앱이 PC 서버에 “선택한 파일을 올려 주세요”, �
 1. **선택 파일 업로드:** 앱은 사용자가 Photo Picker에서 직접 고른 파일만 업로드 세션에 선언합니다. 서버는 실제 파일 유형·크기·SHA-256을 검사합니다. 업로드가 게시 권한을 만들지는 않습니다.
 2. **프로젝트와 작업:** 프로젝트는 원본 미디어와 편집 결과를 묶습니다. 참조 API는 소유자 미디어만 연결하고 응답 `task_id`와 `waiting_plan_approval` 작업, 기획 checkpoint를 만듭니다. API 초안 전체는 계약 승인 대기 상태입니다.
 3. **기획·중간 확인:** `GET /tasks/{id}/checkpoints`로 `plan`을 확인하고 `POST /tasks/{id}/approvals`에 같은 버전/hash의 `continue` 승인을 제출합니다. 승인 뒤 draft checkpoint가 만들어집니다.
-4. **초안 확인과 렌더:** 현재 참조 범위의 초안은 자막 없음·무음 AAC임을 명시합니다. 별도 승인 뒤 `POST /tasks/{id}/render`는 프로젝트에 연결된 소유자 미디어만 큐에 넣습니다. `GET /jobs/{id}`로 상태 조회, `POST /jobs/{id}/cancel`로 취소할 수 있습니다.
+4. **초안 확인과 렌더:** 자막과 선택한 음원·원음/BGM 음량·페이드를 확인하고 수정합니다. 새 버전의 plan과 draft를 각각 승인한 뒤 `POST /tasks/{id}/render`는 프로젝트에 연결된 소유자 미디어만 큐에 넣습니다. `GET /jobs/{id}`로 상태 조회, `POST /jobs/{id}/cancel`로 취소할 수 있습니다. 이전 버전의 무음 렌더는 호환성을 위해 그대로 처리됩니다.
 5. **인증된 미리보기:** `GET /tasks/{id}/preview?content_version=...`는 같은 소유자의 최신 버전만 제공합니다. 실제 MP4는 ffprobe 검증 성공 시에만 `video/mp4`로 반환합니다.
 6. **권리 확인:** 권리 상태는 대문자 `ALLOW`, `REVIEW`, `BLOCK` 중 하나입니다. `ALLOW`만 게시 후보이며, 서버는 게시 직전 다시 검사합니다.
 7. **최종 게시 승인:** 정확한 콘텐츠 버전/hash, 렌더 파일 hash, 플랫폼, 계정, 공개범위, 문구를 한 승인에 묶습니다.
@@ -39,9 +45,23 @@ API는 Android 앱이 PC 서버에 “선택한 파일을 올려 주세요”, �
 
 ### 예투 라우팅·Creator 기획
 
+PC 웹과 Android는 서버 데이터를 공통으로 사용합니다. 참조 구현의 `GET /content/projects`는 인증된 소유자의 프로젝트 목록을 새 항목 우선으로 반환하고, `GET /tasks/{task_id}/jobs`는 소유 작업의 렌더 이력을 반환합니다. 화면은 작업의 현재 `content_version`/`content_hash`와 체크포인트를 다시 조회해 승인 상태를 표시하고, 수정 충돌 `409` 뒤 최신 상태를 불러와야 합니다. 두 목록 경로는 참조 구현의 상태 복원을 위한 추가 경로이며 OpenAPI 전체 승인 대기 상태는 유지됩니다.
+
 `GET /capabilities`는 Creator·Schedule·Wellness·Diary 등록 상태와 확장용 Blog·Music 비활성 상태를 알려줍니다. `POST /assistant/messages`는 한국어 규칙 기반으로 한 Agent를 선택합니다. 요청이 여러 Agent에 걸치거나 분류되지 않으면 질문을 되돌리고, 계획 상태인 Agent는 등록됐지만 아직 기능을 실행하지 않는다고 답합니다. 기획을 만들려면 사용자 인증된 Creator `task_id`가 필요합니다.
 
 Creator의 `POST /tasks/{task_id}/plan`은 그 프로젝트에 연결된 선택 미디어만 사용해 구조화된 쇼츠 장면 기획과 자막 초안을 만듭니다. 기획은 콘텐츠 버전/hash와 `plan` 중간 승인 checkpoint에 저장됩니다. `GET /tasks/{task_id}/plan`으로 현재 기획을 읽을 수 있습니다. 자막은 기획 승인 뒤 `GET /tasks/{task_id}/draft`에서 표시되며, 별도 `draft` 승인 전에 렌더할 수 없습니다. 기획을 수정하면 새 콘텐츠 버전이 되고 이전 승인은 모두 무효화됩니다.
+
+기획 생성 요청은 현재 task 버전인 `content_version`과 비어 있지 않은 `request_text`, `Idempotency-Key`가 필수입니다. 선택적으로 `privacy_consent_id`를 전달할 수 있습니다. 새 요청에 오래된 버전을 사용하면 `409 VERSION_CONFLICT`이며, 동일 멱등 키와 동일 요청의 재전송은 기록된 결과를 반환합니다. 성공하면 새 버전의 기획과 체크포인트가 `201`로 반환됩니다. 이 경로의 참조 구현은 `base_content_version`을 받지 않습니다.
+
+### 자막·로컬 음악 편집
+
+1. `POST /music/tracks`에 제목, 아티스트, `format`(`wav` 또는 `mp3`), `size_bytes`, SHA-256과 `rights`를 등록합니다. `PUT /music/tracks/{track_id}/content`에 사용자가 고른 원본 바이트를 `application/octet-stream`으로 업로드합니다. 두 쓰기 요청에 각각 `Idempotency-Key`가 필요합니다. `GET /music/tracks`는 본인 목록만 반환합니다.
+2. `rights`는 `source_url`, `license_name`, `license_version`, `license_url`, `evidence`, `downloaded_at`(YYYY-MM-DD), `attribution_required`, `required_attribution`, `commercial_allowed`, `platforms`, `explicitly_verified`를 기록합니다. 미확인 항목은 빈 문자열·false·빈 배열로 둘 수 있습니다. `user_verified`는 사용자의 확인 기록이며 법률 검증 보증이 아닙니다. `PATCH /music/tracks/{track_id}/rights`는 `rights_revision`과 새 `rights`를 받아 관련 최종 게시 승인을 무효화합니다.
+3. plan 승인 후 `PATCH /tasks/{task_id}/draft`에 현재 `content_version`/`content_hash`, 순서·시작/끝 초·텍스트로 된 `captions`, `captions_enabled`, `music_track_id`(사용하지 않으면 null), `source_volume`, `music_volume`, `fade_in_seconds`, `fade_out_seconds`를 모두 보냅니다. 음량은 0~2, 페이드는 각각 0~10초이며 영상 길이의 절반을 넘을 수 없습니다. 편집은 새 버전과 plan 체크포인트를 만들며 과거 승인을 무효화합니다. 새 plan과 draft를 재승인해야 렌더할 수 있습니다.
+4. 자막은 항목당 최대 80자, 최대 30개이며 지원 한글·ASCII·일부 문장부호를 사용합니다. 미지원 문자와 제어 문자는 수정이 필요합니다. Noto Sans KR과 FFmpeg/libass로 1080×1920의 보수적 안전 영역에 합성합니다. 실제 플랫폼 UI별 안전 영역은 기기 검증 전입니다.
+5. 음원 권리가 미확인이면 비공개 미리보기는 가능하지만 해당 플랫폼의 최종 게시 승인에서 `403 RIGHTS_REVIEW_REQUIRED`로 차단됩니다. 상업 이용·플랫폼·출처·라이선스 버전·증빙·다운로드일이 확인되고, 필요한 출처 표기가 게시 설명에 포함되어야 합니다. 다른 자산에 대한 완전한 권리 검사는 아직 구현되지 않았습니다.
+
+원본 영상에 소리가 있고 `source_volume`이 0보다 크면, 각 영상에 대해 선택 항목 `source_audio_rights`로 `media_id`, `explicitly_verified`, `commercial_allowed`, 허용 `platforms`, `evidence`, `attribution_required`, `required_attribution`을 기록해야 해당 플랫폼의 최종 게시 승인을 받을 수 있습니다. 생략하면 기존 확인 정보가 유지됩니다. 원본 오디오 권리가 불명확하면 음량을 0으로 설정하거나 권리 확인 후 새 버전을 승인해 주세요.
 
 외부 처리를 요청하려면 먼저 `GET /privacy/processing-notice?provider_id=openai&purpose=vision_analysis`의 제공자·목적·전송 범위·보존 고지를 사용자에게 보여 주세요. 사용자가 확인한 경우에만 그 고지 ID/버전, 목적 `vision_analysis`, `selected_media`·`user_text` 범위와 정확한 업로드 미디어 `resource_ids`를 담아 `POST /privacy/consents`를 호출합니다. 동의 저장은 그 자체로 OpenAI를 호출하지 않습니다. Creator 요청에 반환된 `consent_id`를 `POST /assistant/messages` 또는 `/tasks/{task_id}/plan`의 `privacy_consent_id`로 전달해야 하며, 동의된 resource ID와 요청 프로젝트의 미디어 ID가 정확히 일치해야 합니다. 철회는 `DELETE /privacy/consents/{consent_id}`입니다.
 

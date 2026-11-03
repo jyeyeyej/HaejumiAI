@@ -28,9 +28,14 @@ export function createRenderCoordinator({ repositories, renderer }) {
         projectId: context.project.project_id,
         version: context.task.current_version,
         targetSeconds: context.project.target_seconds,
+        scenes: context.project.creator_plan?.scenes ?? null,
         framing: context.project.framing ?? 'fit_pad',
         focalX: context.project.focal_x ?? 0.5,
         focalY: context.project.focal_y ?? 0.5,
+        captions: context.project.composition?.captions_enabled ? context.project.caption_draft ?? [] : [],
+        composition: context.project.composition ?? null,
+        musicPath: context.musicPath,
+        reuseVideo: context.reuseVideo,
         signal: controller.signal,
       });
       if (!controller.signal.aborted) repositories.finishRenderJob(jobId, result);
