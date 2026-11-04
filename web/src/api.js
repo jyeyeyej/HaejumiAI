@@ -123,8 +123,9 @@ export class HaejumiApi {
   approve(id, checkpoint, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/approvals`, {
     method: 'POST', key, body: { checkpoint_id: safeId(checkpoint.checkpoint_id), content_version: checkpoint.content_version,
       content_hash: checkpoint.content_hash, approval_scope: 'continue' } }); }
-  updateScenes(id, task, scenes, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`, {
-    method: 'PUT', key, body: { content_version: task.current_version, content_hash: task.content_hash, scenes } }); }
+  updateScenes(id, task, scenes, key = crypto.randomUUID(), trendQuery = undefined) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`, {
+    method: 'PUT', key, body: { content_version: task.current_version, content_hash: task.content_hash, scenes,
+      ...(trendQuery === undefined ? {} : { trend_query: trendQuery }) } }); }
   render(id, task, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/render`, {
     method: 'POST', key, body: { content_version: task.current_version, content_hash: task.content_hash } }); }
   cancel(jobId, key = crypto.randomUUID()) { return this.request(`/api/v1/jobs/${safeId(jobId)}/cancel`, { method: 'POST', key }); }

@@ -23,6 +23,7 @@ test('dotenv loader reads only allowlisted local settings without evaluating she
     'HAEJUMI_LLM_MAX_REVISIONS_PER_TASK=3',
     'HAEJUMI_OPENAI_API_KEY=synthetic-openai-key-never-for-network',
     'HAEJUMI_OPENAI_MODEL=gpt-test-model',
+    'HAEJUMI_OPENAI_VISION_TIMEOUT_MS=60000',
     'OPENAI_API_KEY=synthetic-alias-key-never-for-network',
     'OPENAI_MODEL=gpt-test-alias',
     'IGNORED_SETTING=$(Write-Host never-run)',
@@ -42,6 +43,7 @@ test('dotenv loader reads only allowlisted local settings without evaluating she
   assert.equal(target.HAEJUMI_LLM_MAX_CALLS_PER_TASK, '5');
   assert.equal(target.HAEJUMI_LLM_MAX_REVISIONS_PER_TASK, '3');
   assert.equal(target.HAEJUMI_OPENAI_MODEL, 'gpt-test-model');
+  assert.equal(target.HAEJUMI_OPENAI_VISION_TIMEOUT_MS, '60000');
   assert.equal(target.HAEJUMI_OPENAI_API_KEY, 'synthetic-openai-key-never-for-network');
   assert.equal(target.OPENAI_API_KEY, 'synthetic-alias-key-never-for-network');
   assert.equal(Object.hasOwn(target, 'IGNORED_SETTING'), false);

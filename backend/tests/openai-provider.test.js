@@ -21,6 +21,30 @@ test('OpenAI adapter sends only the consented text for assistant interpretation'
   assert.match(body.input[0].content[0].text, /내일 일정/);
 });
 
+test('Vision purpose uses its dedicated longer deadline while text requests retain the generic deadline', async () => {
+  let calls = 0;
+  const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 1000, visionTimeoutMs: 1500,
+    fetchImpl: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      return { ok: true, json: async () => ({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(planResult) }] }] }) };
+    } });
+  assert.equal(new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model' }).visionTimeoutMs, 60_000);
+
+  await assert.rejects(provider.generateStructured({ purpose: 'llm_text', prompt: 'text', input: { operation: 'assistant_route', request: 'hello' } }), (error) => {
+    assert.equal(error.code, 'OPENAI_TIMEOUT');
+    assert.equal(error.timeoutMs, 1000);
+    return true;
+  });
+  const gateway = new LLMGateway({ enabled: true, provider, privacyGate: new PrivacyGate({ enabled: true,
+    providerAllowlist: ['openai'], consentVerifier: async (context) => context.purpose === 'vision_analysis' }) });
+  const vision = await gateway.generate({ ownerId: 'owner', taskId: 'vision-task', consentId: 'consent', purpose: 'vision_analysis',
+    dataCategories: ['selected_media'], resourceIds: ['synthetic-media'], prompt: 'vision', input: { media: [] } });
+  assert.equal(vision.available, true);
+  assert.deepEqual(vision.output, planResult);
+  assert.equal(calls, 2, 'a timed out call is not retried; the second call is a separate explicit test invocation');
+});
+
 test('OpenAI adapter uses Responses JSON output, selected image data, no storage, and a bounded timeout', async () => {
   let seen = null;
   const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 2500, estimatedCostUsd: 0.02,
@@ -64,7 +88,7 @@ test('provider failures are reduced to safe errors and timeout does not retry', 
   const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 1000,
     fetchImpl: async () => { calls += 1; return { ok: false, status: 500, json: async () => ({ error: { message: 'secret detail' } }) }; } });
   await assert.rejects(provider.generateStructured({ prompt: 'test', input: { request: 'test', target_seconds: 30, media: [] } }), (error) => {
-    assert.equal(error.code, 'SERVICE_UNAVAILABLE'); assert.equal(error.message, 'OpenAI request failed'); return true;
+    assert.equal(error.code, 'OPENAI_PROVIDER_ERROR'); assert.equal(error.httpStatus, 500); assert.equal(error.message, 'OpenAI request failed'); return true;
   });
   assert.equal(calls, 1);
 });
@@ -83,8 +107,60 @@ test('OpenAI adapter caps visual attachments and times out without retry', async
   let timeoutCalls = 0;
   const timeoutProvider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 1000,
     fetchImpl: async (_url, init) => { timeoutCalls += 1; return new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true })); } });
-  await assert.rejects(timeoutProvider.generateStructured({ prompt: 'x', input: { request: 'x', target_seconds: 30, media: [] } }), (error) => error.code === 'SERVICE_UNAVAILABLE');
+  await assert.rejects(timeoutProvider.generateStructured({ prompt: 'x', input: { request: 'x', target_seconds: 30, media: [] } }), (error) => {
+    assert.equal(error.code, 'OPENAI_TIMEOUT'); assert.equal(error.diagnosticStage, 'waiting_headers');
+    assert.equal(error.headersReceived, false); assert.equal(error.timeoutMs, 1000); assert.ok(error.elapsedMs >= 900);
+    return true;
+  });
   assert.equal(timeoutCalls, 1);
+});
+
+test('delayed response body is diagnosed separately and an abort-ignoring mock cannot exceed the deadline', async () => {
+  let calls = 0;
+  const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 1000,
+    fetchImpl: async () => { calls += 1; return { ok: true, status: 200, headers: { get: () => 'req_safe_body' }, json: () => new Promise(() => {}) }; } });
+  await assert.rejects(provider.generateStructured({ prompt: 'synthetic', input: { operation: 'assistant_route', request: 'synthetic' } }), (error) => {
+    assert.equal(error.code, 'OPENAI_TIMEOUT'); assert.equal(error.diagnosticStage, 'reading_body');
+    assert.equal(error.headersReceived, true); assert.equal(error.bodyReceived, false);
+    assert.equal(error.httpStatus, 200); assert.equal(error.providerRequestId, 'req_safe_body');
+    assert.ok(error.elapsedMs >= 900); return true;
+  });
+  assert.equal(calls, 1);
+});
+
+test('timeout diagnostic reaches Gateway without prompt, token or provider body while reservation stays intact', async () => {
+  let calls = 0;
+  const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 1000, visionTimeoutMs: 1000,
+    fetchImpl: async () => { calls += 1; return new Promise(() => {}); } });
+  const gateway = new LLMGateway({ enabled: true, provider, privacyGate: new PrivacyGate({ enabled: true,
+    providerAllowlist: ['openai'], consentVerifier: async () => true }), limits: { dailyUsd: 2, monthlyUsd: 20 } });
+  const result = await gateway.generate({ ownerId: 'synthetic-owner', taskId: 'synthetic-task', consentId: 'synthetic-consent',
+    purpose: 'vision_analysis', dataCategories: ['selected_media', 'user_text'], resourceIds: ['synthetic-media'],
+    prompt: 'synthetic prompt only', input: { request: 'synthetic', target_seconds: 9, media: [] } });
+  assert.equal(result.reason, 'OPENAI_TIMEOUT'); assert.equal(result.diagnostic.stage, 'waiting_headers');
+  assert.equal(result.diagnostic.request_started, true);
+  assert.ok(result.diagnostic.gateway_elapsed_ms >= 900);
+  assert.equal(result.diagnostic.headers_received, false); assert.equal(result.diagnostic.timeout_ms, 1000);
+  assert.equal(result.usage.calls_for_task, 1); assert.ok(gateway.usage.dailyUsd > 0); assert.equal(calls, 1);
+  assert.equal(JSON.stringify(result).includes('synthetic-only-test-key'), false);
+  assert.equal(JSON.stringify(result).includes('synthetic prompt only'), false);
+});
+
+test('OpenAI mock HTTP, malformed output and network failures retain only safe diagnostic codes', async () => {
+  const input = { prompt: 'JSON', input: { request: 'synthetic', target_seconds: 9, media: [] } };
+  for (const [status, code] of [[400, 'OPENAI_REQUEST_INVALID'], [401, 'OPENAI_AUTH_FAILED'], [404, 'OPENAI_NOT_FOUND'], [429, 'RATE_LIMITED']]) {
+    const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', fetchImpl: async () =>
+      ({ ok: false, status, headers: { get: () => 'req_safe_123' }, json: async () => ({ error: { message: 'private provider body' } }) }) });
+    await assert.rejects(provider.generateStructured(input), (error) => {
+      assert.equal(error.code, code); assert.equal(error.httpStatus, status); assert.equal(error.providerRequestId, 'req_safe_123');
+      assert.equal(error.message.includes('private provider body'), false); return true;
+    });
+  }
+  const malformed = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', fetchImpl: async () =>
+    ({ ok: true, headers: { get: () => 'req_safe_456' }, json: async () => ({ output: [] }) }) });
+  await assert.rejects(malformed.generateStructured(input), (error) => error.code === 'OPENAI_RESPONSE_INVALID' && error.providerRequestId === 'req_safe_456');
+  const network = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', fetchImpl: async () => { throw new Error('private DNS detail'); } });
+  await assert.rejects(network.generateStructured(input), (error) => error.code === 'OPENAI_NETWORK_ERROR' && !error.message.includes('private DNS detail'));
 });
 
 test('Creator scene result is built from only selected, locally prepared media and requires scoped consent for external vision', async () => {

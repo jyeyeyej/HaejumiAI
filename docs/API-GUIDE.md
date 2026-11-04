@@ -68,6 +68,12 @@ API는 Android 앱이 PC 서버에 “선택한 파일을 올려 주세요”, �
 
 동의가 없거나, 철회·만료됐거나, 전송 범위가 동의와 다르거나 검사를 완료할 수 없으면 PrivacyGate가 provider dispatch를 거부해 외부 요청을 **0회** 발생시킵니다. Creator plan API는 안전한 local-rules fallback 결과를 반환하고 `generation.gate_reason`에 사유를 담습니다. 현재 동기식 plan 흐름에는 대기 중 provider job이 없습니다. 사용자의 문장, STT 전사문, 중간 승인 또는 게시 승인은 외부 전송 동의가 아닙니다.
 
+Vision 공급자 실패는 앞으로 `generation.gate_reason`에 인증·요청 거부·응답 형식·시간 초과·네트워크·공급자 오류를 구분해 기록합니다. 공급자가 반환한 경우에만 `generation.diagnostic.provider_http_status`와 안전한 요청 ID를 기록하며 오류 본문·이미지·키는 저장하지 않습니다. 출력 검증 실패는 `generation.validation_field`에 필드 범주 코드만 남깁니다. 요청별 예약이 시작된 뒤 실패한 경우 `generation.llm_calls`와 예약 추정액을 유지하며, 실제 공급자 도달·과금 여부와 구분해야 합니다. 이전 기록의 포괄적인 `SERVICE_UNAVAILABLE`은 세부 오류를 소급 복원할 수 없습니다.
+
+Vision 시간 초과 진단은 비민감 수치만 남깁니다. `generation.diagnostic`에는 로컬 샘플 준비 시간·성공/실패 개수·준비된 총 바이트, Gateway 경과 시간, Provider의 단계(`waiting_headers`, `reading_body`, `validating_output`), 경과/설정 제한 시간, JSON 요청 바이트 수, 로컬 fetch 호출 여부, 응답 헤더/본문 도착 여부를 기록합니다. Vision 제한은 `HAEJUMI_OPENAI_VISION_TIMEOUT_MS`로 설정하며 기본 60초이고, 다른 LLM 요청은 기존 `HAEJUMI_OPENAI_TIMEOUT_MS` 기본 20초를 사용합니다. Node HTTP 서버의 기본 요청 제한 300초보다 짧습니다. 실제 요청 경과 시간은 Provider가 fetch를 호출하기 직전부터 측정합니다. `waiting_headers`에서 제한 시간이 끝나면 로컬 요청 시작은 확인되지만 공급자 도달·과금 여부는 확인되지 않습니다. 응답 원문, 프롬프트, 미디어, 인증값은 기록하지 않습니다. 자동 재시도는 하지 않으며, 시간 초과 후 재요청은 별도 사용자 동작 및 기존 비용 제한을 따릅니다.
+
+Creator 기획 요청 문구는 게시 제목으로 사용하지 않습니다. 로컬 대체 기획의 `publication_suggestions`는 제목·설명·해시태그가 비어 있어 사용자 작성이 필요합니다. Vision 기반 초안은 검증 가능한 `media_insights`의 분류·피사체에서 플랫폼별 문구를 만들며, 오래된 기획의 요청 문구나 공급자 원문 게시 문구를 PC 웹에서 그대로 가져오지 않습니다. 확인되지 않은 맛·가격·장소·방문 평가는 사용자가 직접 확인해야 합니다. 게시 정보 저장과 플랫폼별 최종 승인은 기존 버전·권리 검사를 그대로 거칩니다.
+
 ## Creator 사진·영상 제작 흐름
 
 프로젝트 목표 길이는 3~59초 정수이며 기본 30초입니다. 렌더 요청은 `vertical_9_16_h264_aac` 프로필과 승인된 프로젝트의 `fit_pad`(기본) 또는 `fill_crop` 초점 설정을 사용합니다. plan checkpoint와 자막·오디오 구성 초안 checkpoint에 각각 `continue` 승인이 있어야 `render_ready`가 됩니다. 테스트 렌더 결과는 `simulated`로 표시되고 MP4 미리보기로 제공되지 않습니다.
@@ -113,7 +119,9 @@ Creator 기획 장면에 `framing`(`inherit`/`fit_pad`/`fill_crop`/`blur_pad`), 
 
 Creator 기획안의 `publication_suggestions`는 YouTube·TikTok·Instagram별 제목·설명·해시태그 **초안**입니다. PC 웹은 사용자가 해당 문구를 불러와 직접 수정하게 하며 계정·공개범위는 AI가 설정하지 않습니다. 게시 정보 저장, 영상 미리보기, 플랫폼별 최종 승인과 실제 게시 금지는 기존 규칙을 따릅니다.
 
-인증된 `GET /trends/search?topic=restaurant|cafe|travel&days=30`은 기본 비활성인 YouTube Data API 메타데이터 검색입니다. `days`는 1~90일이며 라이브 사용에는 서버 측 API 키와 `HAEJUMI_TRENDS_LIVE_ENABLED=true`가 필요합니다. 활성화 시 한 번의 검색에 `search.list`와 `videos.list` 최대 2회, UTC 하루 10회까지 예약합니다. 결과는 링크·게시일·조회수·좋아요·댓글·길이만 표시하며 짧은 영상 메타데이터로 한정합니다. 영상·음원·자막을 다운로드하거나 내부 편집 효과를 분석하지 않습니다. 비활성·할당량 초과·응답 실패 시 `analysis_scope=none` 로컬 안내로 돌아갑니다. 실제 API 키와 할당량 사용은 별도 승인 전 실행하지 않았습니다.
+인증된 `GET /trends/status`는 외부 API 호출 없이 검색 활성화 상태와 제한을 반환합니다. `GET /trends/search?topic=restaurant|cafe|travel&days=30`은 YouTube Data API 메타데이터 검색입니다. `days`는 1~90일이며 라이브 사용에는 서버 측 `HAEJUMI_YOUTUBE_API_KEY` 또는 `YOUTUBE_API_KEY`와 `HAEJUMI_TRENDS_LIVE_ENABLED=true`가 필요합니다. 활성화 시 캐시가 없는 한 번의 검색에 `search.list`와 `videos.list` 최대 2회, UTC 하루 10회까지 예약합니다. 성공 결과는 서버 메모리에 15분 보관하며 서버 재시작 시 비워집니다. 결과는 제목·설명 일부·링크·게시일·조회수·좋아요·댓글·길이만 표시하며 짧은 영상 메타데이터로 한정합니다. 영상·음원·자막을 다운로드하거나 내부 편집 효과를 분석하지 않습니다. 비활성·할당량 초과·응답 실패 시 `analysis_scope=none` 로컬 안내로 돌아갑니다. 실제 API 호출은 사용자가 PC 웹에서 검색을 누를 때만 실행합니다.
+
+PC 웹의 장면별 자동 혼합 편집은 현재 검색 결과의 주제·키워드와 **기존에 검증된 Vision 장면 분류**를 결합해, 서버가 이미 지원하는 크롭·블러 배경·줌·팬·컷·페이드·자막 스타일만 제안합니다. 검색 메타데이터로 참고 영상의 컷 길이나 효과를 알아낼 수 없으므로 연출은 해주미 자체 추천으로 구분합니다. 사용자가 제안을 검토·수정한 후 `PUT /tasks/{task_id}/plan`으로 저장할 때 선택적 `trend_query: {topic, days}`를 보내면 서버는 해당 15분 캐시에서 최신·관련 결과만 다시 확인하고 출처·조회시각·키워드·영상 링크를 `plan.trend_reference`에 기록합니다. 캐시가 없거나 오래되면 409 `TREND_CACHE_MISSING`이며 검색 API를 자동 호출하지 않습니다. `trend_query: null`은 이전 참고 기록을 지웁니다. 검색 실패 시 로컬 효과 제안만 가능하며 Vision 정보가 없는 미디어에는 내용을 추측하지 않는 기본 효과를 적용합니다. 장면 저장은 기존 콘텐츠 버전 증가와 승인 무효화를 유지합니다.
 
 현재 외부 호출 기본 비활성화이며 이번 테스트에서는 Mock/가짜 `fetch`만 사용합니다. 초기 한도는 설정 가능한 제안값으로 일 `$0.20`, 월 `$5`, 작업당 5회입니다. 준비 미디어당 예상비용은 보수 예약 설정값이지 청구액 보증이 아닙니다. 예산 예약은 로컬 state에 기록하고 timeout이나 애매한 결과는 자동 재호출하지 않습니다.
 

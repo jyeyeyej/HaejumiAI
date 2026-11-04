@@ -43,11 +43,15 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
         response.writeHead(204, { 'Cache-Control': 'no-store' }); response.end(); return;
       }
 
+      if (path === '/trends/status' && request.method === 'GET') {
+        return sendJson(response, 200, { enabled: Boolean(trends?.enabled), provider: trends?.enabled ? 'youtube_data_api' : null,
+          daily_limit: 10, cache_seconds: trends?.cacheTtlMs ? Math.floor(trends.cacheTtlMs / 1000) : 0 });
+      }
       if (path === '/trends/search' && request.method === 'GET') {
         if (!trends) return sendError(response, 503, 'SERVICE_UNAVAILABLE');
         const topic = url.searchParams.get('topic'); const days = Number(url.searchParams.get('days') ?? 30);
         if (!['restaurant', 'cafe', 'travel'].includes(topic) || !Number.isInteger(days) || days < 1 || days > 90) return sendError(response, 422, 'VALIDATION_ERROR');
-        if (trends.enabled) {
+        if (trends.enabled && !trends.getCached({ topic, days })) {
           const today = new Date().toISOString().slice(0, 10);
           const usage = repositories.state.data.trendSearchUsage ?? { day: today, count: 0 };
           if (usage.day !== today) { usage.day = today; usage.count = 0; }
@@ -374,7 +378,9 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
       }
       if (request.method === 'PUT' && match) {
         requireJson(request); requireIdempotencyKey(request);
-        return sendJson(response, 200, repositories.updateCreatorScenes(principal.ownerId, match[1], await readJson(request), request.headers['idempotency-key']));
+        const body = await readJson(request);
+        const cachedTrend = body.trend_query && trends?.getCached({ topic: body.trend_query.topic, days: body.trend_query.days });
+        return sendJson(response, 200, repositories.updateCreatorScenes(principal.ownerId, match[1], body, request.headers['idempotency-key'], cachedTrend));
       }
 
       match = /^\/tasks\/([0-9a-f-]+)\/draft$/.exec(path);

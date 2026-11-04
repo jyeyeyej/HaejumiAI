@@ -18,7 +18,7 @@ test('official YouTube adapter uses two metadata requests, recent dates and publ
     fetchImpl: async (url) => {
       calls.push(url);
       if (url.pathname.endsWith('/search')) return { ok: true, json: async () => ({ items: [{ id: { videoId } }] }) };
-      return { ok: true, json: async () => ({ items: [{ id: videoId, snippet: { title: '합성 카페 영상', publishedAt: '2026-11-01T00:00:00Z' },
+      return { ok: true, json: async () => ({ items: [{ id: videoId, snippet: { title: '합성 카페 영상', description: '합성 커피 장면 설명', publishedAt: '2026-11-01T00:00:00Z' },
         statistics: { viewCount: '1200', likeCount: '23', commentCount: '4' }, contentDetails: { duration: 'PT45S' } },
       { id: 'longVID1234', snippet: { title: '긴 영상' }, statistics: { viewCount: '9999' }, contentDetails: { duration: 'PT4M' } }] }) };
     } });
@@ -29,8 +29,26 @@ test('official YouTube adapter uses two metadata requests, recent dates and publ
   assert.equal(calls[0].searchParams.get('order'), 'viewCount');
   assert.equal(calls[1].searchParams.get('part'), 'snippet,statistics,contentDetails');
   assert.equal(result.items.length, 1); assert.equal(result.items[0].view_count, 1200);
+  assert.equal(result.items[0].description, '합성 커피 장면 설명');
   assert.equal(result.items[0].analysis_scope, 'metadata_only');
   assert.equal(result.items[0].url, `https://www.youtube.com/watch?v=${videoId}`);
+  const cached = await trends.search({ topic: 'cafe', days: 30 });
+  assert.deepEqual(cached, result);
+  assert.equal(calls.length, 2);
+});
+
+test('successful metadata cache expires without retaining failed provider responses', async () => {
+  let time = Date.parse('2026-11-04T00:00:00Z'); let calls = 0;
+  const trends = new YouTubeTrends({ apiKey: 'synthetic-key', enabled: true, now: () => new Date(time), cacheTtlMs: 1000,
+    fetchImpl: async () => { calls += 1; return { ok: true, json: async () => ({ items: [] }) }; } });
+  await trends.search({ topic: 'travel' });
+  assert.ok(trends.getCached({ topic: 'travel' }));
+  await trends.search({ topic: 'travel' });
+  assert.equal(calls, 1);
+  time += 1001;
+  assert.equal(trends.getCached({ topic: 'travel' }), null);
+  await trends.search({ topic: 'travel' });
+  assert.equal(calls, 2);
 });
 
 test('YouTube quota and provider errors fall back without retry or effect-analysis claims', async () => {
@@ -56,4 +74,9 @@ test('trend HTTP route requires authentication and never exposes the provider ke
   const body = await response.text();
   assert.equal(JSON.parse(body).analysis_scope, 'none');
   assert.equal(body.includes('synthetic-key'), false);
+  const statusUrl = url.replace('/trends/search?topic=cafe&days=30', '/trends/status');
+  assert.equal((await fetch(statusUrl)).status, 401);
+  const status = await fetch(statusUrl, { headers: { Authorization: 'Bearer synthetic-owner-token' } });
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), { enabled: false, provider: null, daily_limit: 10, cache_seconds: 900 });
 });

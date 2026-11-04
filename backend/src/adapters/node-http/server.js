@@ -51,6 +51,7 @@ const llmAvailability = resolveLlmAvailability({ llmRequested, liveEnabled, keyC
 const llmEnabled = llmAvailability.enabled;
 const openAiProvider = llmEnabled && openAiKey && openAiModel ? new OpenAIProvider({ apiKey: openAiKey, model: openAiModel,
   timeoutMs: parseInteger(process.env.HAEJUMI_OPENAI_TIMEOUT_MS, 20_000),
+  visionTimeoutMs: parseInteger(process.env.HAEJUMI_OPENAI_VISION_TIMEOUT_MS, 60_000),
   maxImages: maxVisionImages,
   estimatedCostUsd: parseNumber(process.env.HAEJUMI_LLM_ESTIMATED_COST_PER_ITEM_USD, 0.01) }) : null;
 
@@ -71,7 +72,7 @@ const llmGateway = new LLMGateway({ enabled: llmEnabled, provider: openAiProvide
 const capabilityRegistry = createDefaultCapabilityRegistry();
 const supervisorRouter = new SupervisorRouter(capabilityRegistry);
 const creatorAgent = new CreatorAgent({ gateway: llmGateway });
-const trends = new YouTubeTrends({ apiKey: process.env.HAEJUMI_YOUTUBE_API_KEY ?? '',
+const trends = new YouTubeTrends({ apiKey: process.env.HAEJUMI_YOUTUBE_API_KEY || process.env.YOUTUBE_API_KEY || '',
   enabled: parseBoolean(process.env.HAEJUMI_TRENDS_LIVE_ENABLED, false) });
 const renderDir = ensureStorageDirectory(safeStoragePath(dataDir, 'renders'), dataDir);
 const renderer = createFFmpegRenderer({ mediaRoot: repositories.blobDir, outputRoot: renderDir, ...mediaToolPaths });

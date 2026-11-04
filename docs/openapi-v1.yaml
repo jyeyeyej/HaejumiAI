@@ -343,12 +343,32 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
+  /trends/status:
+    get:
+      tags: [Trends]
+      operationId: getCreatorTrendStatus
+      summary: Read authenticated YouTube metadata search readiness without making a provider request
+      responses:
+        '200':
+          description: Server-side activation and request limits; does not reveal the API key
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, provider, daily_limit, cache_seconds]
+                properties:
+                  enabled: { type: boolean }
+                  provider: { type: [string, 'null'], enum: [youtube_data_api, null] }
+                  daily_limit: { type: integer, minimum: 0 }
+                  cache_seconds: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
   /trends/search:
     get:
       tags: [Trends]
       operationId: searchCreatorTrendMetadata
       summary: Search recent short-video metadata from the official YouTube Data API
-      description: Authenticated request; server-side key only. Disabled by default. No reference video/audio download or editing-effect inspection. At most 10 live searches per UTC day.
+      description: Authenticated request; server-side key only. Disabled by default. No reference video/audio download or editing-effect inspection. At most 10 uncached live searches per UTC day; successful results are cached in memory for 15 minutes.
       parameters:
         - { name: topic, in: query, required: true, schema: { type: string, enum: [restaurant, cafe, travel] } }
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 90, default: 30 } }
@@ -471,7 +491,7 @@ paths:
       tags: [Tasks]
       operationId: updateCreatorSceneTimeline
       summary: Reorder selected media and adjust scene durations or selected video start positions
-      description: Uses the current content version and hash. The media IDs must be the same owned project items exactly once; durations must sum to target_seconds. A successful edit increments the content version and invalidates affected approvals.
+      description: Uses the current content version and hash. The media IDs must be the same owned project items exactly once; durations must sum to target_seconds. Optional trend_query attaches only a still-cached, recent, relevant YouTube metadata summary; it never searches the API or proves video effects. Null clears a prior reference. A successful edit increments the content version and invalidates affected approvals.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -1852,6 +1872,14 @@ components:
       properties:
         content_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
+        trend_query:
+          type: [object, 'null']
+          description: Optional cached trend query to record with this edit. Null clears the previous reference. A cache miss or irrelevant/stale result returns 409; this PUT never calls YouTube.
+          additionalProperties: false
+          required: [topic, days]
+          properties:
+            topic: { type: string, enum: [restaurant, cafe, travel] }
+            days: { type: integer, minimum: 1, maximum: 90 }
         scenes:
           type: array
           minItems: 1
@@ -1894,6 +1922,29 @@ components:
         mood: { type: string, maxLength: 500 }
         ending_line: { type: string, maxLength: 500 }
         recommended_media_order: { type: array, description: Suggested order only; actual order changes require a versioned scene edit and new approval., items: { type: string, format: uuid } }
+        trend_reference:
+          type: object
+          description: Optional source evidence from cached YouTube titles/descriptions and public metrics. No reference video effects were inspected.
+          additionalProperties: false
+          required: [source, analysis_scope, topic, queried_at, period_days, keywords, title_patterns, references]
+          properties:
+            source: { type: string, const: youtube_data_api }
+            analysis_scope: { type: string, const: metadata_only }
+            topic: { type: string, enum: [restaurant, cafe, travel] }
+            queried_at: { type: string, format: date-time }
+            period_days: { type: integer, minimum: 1, maximum: 90 }
+            keywords: { type: array, items: { type: string } }
+            title_patterns: { type: array, description: Allowlisted expressions actually present in relevant video titles; not copied title text., items: { type: string } }
+            references:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [url, published_at, view_count]
+                properties:
+                  url: { type: string, format: uri }
+                  published_at: { type: string, format: date-time }
+                  view_count: { type: [integer, 'null'], minimum: 0 }
         publication_suggestions:
           type: array
           description: Draft text only; account and visibility are never selected and no publication occurs.
@@ -2115,6 +2166,25 @@ components:
         llm_calls: { type: integer, minimum: 0 }
         estimated_cost_usd: { type: number, minimum: 0 }
         gate_reason: { type: [string, 'null'] }
+        validation_field: { type: string, enum: [PLAN_MISSING, SCENES_MEDIA_MISMATCH, CAPTIONS_FORMAT, CAPTIONS_UNUSABLE] }
+        diagnostic:
+          type: object
+          additionalProperties: false
+          properties:
+            provider_http_status: { type: [integer, 'null'], minimum: 100, maximum: 599 }
+            provider_request_id: { type: [string, 'null'], maxLength: 128 }
+            stage: { type: string, enum: [waiting_headers, reading_body, validating_output], description: Local phase at failure; does not prove provider delivery. }
+            elapsed_ms: { type: integer, minimum: 0 }
+            timeout_ms: { type: integer, minimum: 1000 }
+            request_bytes: { type: integer, minimum: 0, description: JSON request size only; no request content. }
+            gateway_elapsed_ms: { type: integer, minimum: 0 }
+            request_started: { type: boolean, description: Local fetch invocation only; provider delivery is not proven. }
+            headers_received: { type: boolean }
+            body_received: { type: boolean }
+            preparation_elapsed_ms: { type: integer, minimum: 0 }
+            prepared_samples: { type: integer, minimum: 0 }
+            prepared_bytes: { type: integer, minimum: 0 }
+            preparation_failures: { type: integer, minimum: 0 }
     Transcript:
       type: object
       additionalProperties: false

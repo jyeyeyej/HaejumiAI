@@ -82,3 +82,22 @@ test('monthly cost ceiling blocks new tasks after the monthly reservation is exh
   assert.equal((await gateway.generate({ taskId: 'task-b', prompt: 'mock', input: {} })).reason, 'LLM_BUDGET_EXCEEDED');
   assert.equal(provider.calls, 1);
 });
+
+test('failed provider attempt keeps reserved cost and safe HTTP diagnostics while consent denial reserves nothing', async () => {
+  let allowed = false; let calls = 0;
+  const provider = { mode: 'external', providerId: 'openai', estimateCostUsd: async () => 0.05,
+    generateStructured: async () => { calls += 1; throw Object.assign(new Error('private provider body'),
+      { code: 'OPENAI_AUTH_FAILED', httpStatus: 401, providerRequestId: 'req_safe_123' }); } };
+  const gateway = new LLMGateway({ enabled: true, provider, privacyGate: new PrivacyGate({ enabled: true,
+    providerAllowlist: ['openai'], consentVerifier: async () => allowed }), limits: { dailyUsd: 2, monthlyUsd: 20 } });
+  const request = { ownerId: 'owner', taskId: 'task', consentId: 'consent', purpose: 'vision_analysis', dataCategories: ['selected_media'],
+    resourceIds: ['selected'], prompt: 'JSON', input: {} };
+  const denied = await gateway.generate(request);
+  assert.equal(denied.reason, 'CONSENT_REQUIRED'); assert.equal(denied.usage.calls_for_task, 0); assert.equal(calls, 0);
+  allowed = true;
+  const failed = await gateway.generate(request);
+  assert.equal(failed.reason, 'OPENAI_AUTH_FAILED'); assert.equal(failed.usage.calls_for_task, 1);
+  assert.equal(failed.usage.estimated_cost_usd, 0.05); assert.equal(gateway.usage.dailyUsd, 0.05);
+  assert.deepEqual(failed.diagnostic, { provider_http_status: 401, provider_request_id: 'req_safe_123' });
+  assert.equal(calls, 1);
+});

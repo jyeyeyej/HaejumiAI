@@ -1,5 +1,6 @@
 import { validSceneEffects } from '../media-engine/scene-effects.js';
 import { captionScene, validCaptionText, validCaptionTimeline } from '../media-engine/caption-timeline.js';
+import { publicationDraftsFromPlan } from '../../../shared/publication-drafts.js';
 
 export class CreatorAgent {
   constructor({ gateway }) { this.gateway = gateway; }
@@ -26,12 +27,23 @@ export class CreatorAgent {
         return { plan: normalized.plan, captions: normalized.captions,
           generation: { source: this.gateway.provider?.mode === 'mock' ? 'mock' : 'gateway', fallback_used: partial,
             llm_calls: result.usage.calls_for_task, estimated_cost_usd: result.usage.estimated_cost_usd,
-            gate_reason: partial ? 'PARTIAL_MODEL_OUTPUT' : null } };
+            gate_reason: partial ? 'PARTIAL_MODEL_OUTPUT' : null,
+            ...(partial ? { validation_field: visionValidationField(result.output, media) } : {}) } };
       }
     }
     return { ...makeRuleBasedPlan(project, media, requestText), generation: { source: 'local_rules', fallback_used: true,
-      llm_calls: result.usage.calls_for_task, estimated_cost_usd: result.usage.estimated_cost_usd, gate_reason: result.reason ?? 'INVALID_MODEL_OUTPUT' } };
+      llm_calls: result.usage.calls_for_task, estimated_cost_usd: result.usage.estimated_cost_usd, gate_reason: result.reason ?? 'INVALID_MODEL_OUTPUT',
+      ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
+      ...(result.available ? { validation_field: visionValidationField(result.output, media) } : {}) } };
   }
+}
+
+function visionValidationField(output, media) {
+  if (!output?.plan || typeof output.plan !== 'object') return 'PLAN_MISSING';
+  if (!Array.isArray(output.plan.scenes) || output.plan.scenes.length !== media.length ||
+      output.plan.scenes.some((scene, index) => scene?.media_id !== media[index].mediaId)) return 'SCENES_MEDIA_MISMATCH';
+  if (output.captions !== undefined && !Array.isArray(output.captions)) return 'CAPTIONS_FORMAT';
+  return 'CAPTIONS_UNUSABLE';
 }
 
 function makeRuleBasedPlan(project, media, requestText) {
@@ -49,7 +61,7 @@ function makeRuleBasedPlan(project, media, requestText) {
   return { plan: { title_idea: title, format: 'vertical_short', aspect_ratio: '9:16', target_seconds: duration,
     theme: title, opening_hook: '첫 장면 문구를 직접 작성해 주세요.', story_flow: '선택한 순서대로 장면을 이어 보여줍니다.', mood: '사용자 확인 필요',
     ending_line: '마지막 장면 문구를 직접 작성해 주세요.', recommended_media_order: media.map((item) => item.mediaId),
-    publication_suggestions: publicationSuggestions(title), media_insights: media.map((item) => ({ media_id: item.mediaId,
+    publication_suggestions: publicationDraftsFromPlan(null, { source: 'local_rules' }), media_insights: media.map((item) => ({ media_id: item.mediaId,
       description: '시각 분석을 수행하지 않았습니다.', mood: '확인 필요', subjects: [], usable_detail: '사용자가 직접 장면을 확인해 주세요.', uncertainty: '외부 AI 분석 없음',
       category: 'unknown', orientation: 'unknown' })), scenes }, captions };
 }
@@ -99,13 +111,6 @@ function normalizeVisionOutput(output, project, media, requestText) {
       new Set(output.plan.recommended_media_order).size === media.length && output.plan.recommended_media_order.every((id) => byId.has(id))) {
     plan.recommended_media_order = output.plan.recommended_media_order;
   }
-  if (Array.isArray(output.plan.publication_suggestions) && output.plan.publication_suggestions.length === 3 &&
-      new Set(output.plan.publication_suggestions.map((item) => item?.platform)).size === 3 &&
-      output.plan.publication_suggestions.every((item) => item && ['youtube', 'tiktok', 'instagram'].includes(item.platform) &&
-        typeof item.title === 'string' && item.title.length <= 200 && typeof item.description === 'string' && item.description.length <= 5000 &&
-        Array.isArray(item.hashtags) && item.hashtags.length <= 30 && item.hashtags.every((tag) => typeof tag === 'string' && tag.length <= 100))) {
-    plan.publication_suggestions = output.plan.publication_suggestions;
-  }
   let captions = safeRawCaptions.filter((caption) => caption && Number.isFinite(caption.start_seconds) && Number.isFinite(caption.end_seconds) &&
     captionScene(caption, scenes) && validCaption(caption.text, caption.end_seconds - caption.start_seconds, requestText))
     .sort((a, b) => a.start_seconds - b.start_seconds);
@@ -122,6 +127,7 @@ function normalizeVisionOutput(output, project, media, requestText) {
   captions = captions.sort((a, b) => a.start_seconds - b.start_seconds).slice(0, 30).map((caption, index) => ({
     order: index + 1, start_seconds: caption.start_seconds, end_seconds: caption.end_seconds, text: caption.text }));
   if (!captions.length) return null;
+  plan.publication_suggestions = publicationDraftsFromPlan(plan, { source: 'gateway' });
   return { plan, captions };
 }
 
@@ -163,11 +169,6 @@ function validCaption(text, seconds, requestText) {
 function deriveTitle(text) {
   const cleaned = text.trim().replace(/\s+/g, ' ');
   return cleaned.length > 64 ? `${cleaned.slice(0, 61)}…` : cleaned;
-}
-
-function publicationSuggestions(title) {
-  return ['youtube', 'tiktok', 'instagram'].map((platform) => ({ platform, title,
-    description: '선택한 사진과 영상으로 만든 쇼츠입니다. 내용을 확인한 뒤 게시 정보를 수정해 주세요.', hashtags: ['쇼츠'] }));
 }
 
 function roundTime(value) { return Math.round(value * 100) / 100; }

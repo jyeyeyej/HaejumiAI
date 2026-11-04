@@ -55,6 +55,27 @@ test('Creator does not call the LLM when local image preparation produced no sel
   assert.equal(result.generation.gate_reason, 'LOCAL_MEDIA_PREPARATION_UNAVAILABLE');
 });
 
+test('Vision budget denial and invalid output remain labeled local empty drafts', async () => {
+  const input = { ownerId: 'owner', taskId: 'task', project: { target_seconds: 8 }, requestText: '여행 쇼츠',
+    privacyConsentId: 'synthetic-consent', media: [{ mediaId: 'selected', mediaType: 'image/jpeg', imageDataUrl: 'data:image/jpeg;base64,c3ludGhldGlj' }] };
+  let providerCalls = 0;
+  const blocked = await new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () =>
+    ({ available: false, reason: 'LLM_BUDGET_EXCEEDED', usage: { calls_for_task: 0, estimated_cost_usd: 0 } }) } }).createPlan(input);
+  assert.equal(blocked.generation.source, 'local_rules');
+  assert.equal(blocked.generation.gate_reason, 'LLM_BUDGET_EXCEEDED');
+  assert.equal(blocked.generation.llm_calls, 0);
+  assert.deepEqual(blocked.captions, []);
+  const invalid = await new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () => {
+    providerCalls += 1;
+    return { available: true, output: { plan: { scenes: [] }, captions: [] }, usage: { calls_for_task: 1, estimated_cost_usd: 0.01 } };
+  } } }).createPlan(input);
+  assert.equal(providerCalls, 1);
+  assert.equal(invalid.generation.source, 'local_rules');
+  assert.equal(invalid.generation.gate_reason, 'INVALID_MODEL_OUTPUT');
+  assert.equal(invalid.generation.validation_field, 'SCENES_MEDIA_MISMATCH');
+  assert.deepEqual(invalid.captions, []);
+});
+
 test('Creator accepts labeled photo/video Mock insights and rejects template captions or unsupported output', async () => {
   const media = [{ mediaId: 'photo', mediaType: 'image/jpeg', imageDataUrl: 'data:image/jpeg;base64,cGhvdG8=' },
     { mediaId: 'clip', mediaType: 'video/mp4', imageDataUrl: 'data:image/jpeg;base64,ZnJhbWU=' }];
@@ -76,6 +97,8 @@ test('Creator accepts labeled photo/video Mock insights and rejects template cap
     ownerId: 'owner', taskId: 'task', project: { target_seconds: 8 }, media, requestText: '차분한 여행', privacyConsentId: 'consent' });
   assert.equal(result.generation.source, 'mock');
   assert.equal(result.plan.media_insights[1].uncertainty, '장소는 알 수 없습니다.');
+  assert.notEqual(result.plan.publication_suggestions[0].title, '차분한 여행');
+  assert.ok(result.plan.publication_suggestions[0].hashtags.includes('여행'));
   assert.deepEqual(result.plan.recommended_media_order, ['clip', 'photo']);
   const variable = structuredClone(output);
   variable.captions = [

@@ -93,6 +93,36 @@ test('trend metadata request remains on authenticated local API with a bounded p
   assert.equal(calls.length, 1);
 });
 
+test('mixed edit saves only a cached trend selector and current version, without another search', async () => {
+  const calls = [];
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const api = new HaejumiApi('synthetic-token', async (path, options) => { calls.push({ path, options }); return Response.json({ plan: {} }); });
+  await api.updateScenes(id, { current_version: 4, content_hash: 'a'.repeat(64) },
+    [{ media_id: id, duration_seconds: 6, motion: 'zoom_in' }], 'mixed-edit-key-0001', { topic: 'travel', days: 30 });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, `/api/v1/tasks/${id}/plan`);
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-token');
+  assert.equal(calls[0].options.headers['Idempotency-Key'], 'mixed-edit-key-0001');
+  const body = JSON.parse(calls[0].options.body);
+  assert.deepEqual(body.trend_query, { topic: 'travel', days: 30 });
+  assert.equal(body.content_version, 4); assert.equal(body.content_hash, 'a'.repeat(64));
+});
+
+test('web request cancellation stops the local wait without automatic retry', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const api = new HaejumiApi('synthetic-token', async (_path, options) => {
+    calls += 1;
+    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { name: 'AbortError' })), { once: true }));
+  });
+  const pending = api.request('/api/v1/tasks/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/plan', {
+    method: 'POST', key: 'synthetic-cancel-key', signal: controller.signal,
+    body: { content_version: 1, request_text: '합성 문장' } });
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(calls, 1);
+});
+
 test('selected upload uses one file, SHA-256 manifest, and per-step idempotency keys', async () => {
   const calls = [];
   const file = new File([new Uint8Array([1, 2, 3])], 'selected.png', { type: 'image/png' });

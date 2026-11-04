@@ -224,6 +224,9 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.equal(routed.content_version, 2);
   assert.equal(routed.generation.source, 'mock');
   assert.equal(routed.generation.fallback_used, false);
+  assert.equal(routed.generation.diagnostic.prepared_samples, 1);
+  assert.ok(routed.generation.diagnostic.preparation_elapsed_ms >= 0);
+  assert.ok(routed.generation.diagnostic.prepared_bytes > 0);
   const planRead = await fetch(`${base}/tasks/${project.task_id}/plan`, { headers: headers() });
   assert.equal(planRead.status, 200);
   assert.equal((await planRead.json()).content_hash, routed.content_hash);
@@ -481,6 +484,39 @@ async function prepareUnapprovedProject(base, suffix) {
   const created = await fetch(`${base}/content/projects`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': `project-plan-${suffix}` }, body: JSON.stringify({ media_ids: [mediaId] }) });
   return { project: await created.json(), mediaId };
 }
+
+test('Vision timeout keeps selected media and project; a new explicit request is required to retry', async (t) => {
+  const { base, repositories, mockLLM } = await fixture(t);
+  const { project, mediaId } = await prepareUnapprovedProject(base, 9881);
+  const notice = await fetch(`${base}/privacy/processing-notice?provider_id=openai&purpose=vision_analysis`, { headers: headers() }).then((r) => r.json());
+  const consentResponse = await fetch(`${base}/privacy/consents`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'timeout-consent-key-9881' },
+    body: JSON.stringify({ provider_id: 'openai', purpose: 'vision_analysis', data_categories: notice.data_categories,
+      resource_ids: [mediaId], notice_id: notice.notice_id, notice_version: notice.notice_version,
+      explicitly_confirmed: true, expires_at: new Date(Date.now() + 60_000).toISOString() }) });
+  assert.equal(consentResponse.status, 201);
+  const consent = await consentResponse.json();
+  const original = mockLLM.generateStructured;
+  mockLLM.generateStructured = async () => { mockLLM.calls += 1; throw Object.assign(new Error('synthetic private detail'), { code: 'OPENAI_TIMEOUT' }); };
+  const request = (version, key) => fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: {
+    ...headers(), 'content-type': 'application/json', 'idempotency-key': key },
+  body: JSON.stringify({ content_version: version, request_text: '합성 여행 쇼츠', privacy_consent_id: consent.consent_id }) });
+  const firstResponse = await request(1, 'timeout-plan-key-9881');
+  assert.equal(firstResponse.status, 201);
+  const first = await firstResponse.json();
+  assert.equal(first.generation.gate_reason, 'OPENAI_TIMEOUT');
+  assert.equal(first.generation.source, 'local_rules'); assert.equal(first.generation.llm_calls, 1);
+  assert.equal(first.generation.diagnostic.prepared_samples, 1);
+  assert.equal(mockLLM.calls, 1, 'timeout must not cause automatic retry');
+  assert.deepEqual(repositories.state.data.projects[project.project_id].media_ids, [mediaId]);
+  assert.equal(repositories.state.data.media[mediaId].status, 'available');
+  mockLLM.generateStructured = original;
+  const secondResponse = await request(first.content_version, 'manual-plan-key-9881');
+  assert.equal(secondResponse.status, 201);
+  const second = await secondResponse.json();
+  assert.equal(second.generation.source, 'mock'); assert.equal(second.content_version, first.content_version + 1);
+  assert.equal(mockLLM.calls, 2);
+  assert.deepEqual(repositories.state.data.projects[project.project_id].media_ids, [mediaId]);
+});
 
 test('platform publication metadata is owner-scoped, independent, idempotent and edits invalidate only its approval', async (t) => {
   const { base, repositories } = await fixture(t);

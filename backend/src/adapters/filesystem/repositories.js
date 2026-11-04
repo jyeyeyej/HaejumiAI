@@ -7,6 +7,7 @@ import { MusicLibrary } from '../../security/music-library.js';
 import { CAPTION_FONT_SHA256 } from '../../media-engine/caption-font.js';
 import { validSceneEffects } from '../../media-engine/scene-effects.js';
 import { captionScene, validCaptionTimeline } from '../../media-engine/caption-timeline.js';
+import { summarizeTrend } from '../../../../shared/trend-edit.js';
 
 export const PRIVACY_NOTICE_ID = '610ef7d0-c730-4de0-b24c-5b80e9241d11';
 export const PRIVACY_NOTICE_VERSION = '1';
@@ -459,6 +460,8 @@ export class LocalRepositories {
     try {
       const selectedMedia = [];
       let preparedImageCount = 0;
+      let preparedBytes = 0; let preparationFailures = 0;
+      const preparationStarted = performance.now();
       for (const item of media) {
         const selected = { mediaId: item.mediaId, mediaType: item.mediaType };
         if (input.privacy_consent_id && preparedImageCount < this.maxVisionImages) {
@@ -468,24 +471,29 @@ export class LocalRepositories {
             if (item.mediaType.startsWith('image/') && this.imagePreparer) {
               const prepared = await this.imagePreparer(safeStoragePath(this.blobDir, item.storageKey));
               if (Buffer.isBuffer(prepared) && prepared.length > 0 && prepared.length <= 2 * 1024 * 1024) {
-                selected.imageDataUrl = `data:image/jpeg;base64,${prepared.toString('base64')}`; preparedImageCount += 1;
+                selected.imageDataUrl = `data:image/jpeg;base64,${prepared.toString('base64')}`; preparedImageCount += 1; preparedBytes += prepared.length;
               }
             }
             else if (item.mediaType.startsWith('video/') && this.videoFrameExtractor) {
               const frame = await this.videoFrameExtractor(safeStoragePath(this.blobDir, item.storageKey));
               if (Buffer.isBuffer(frame) && frame.length > 0 && frame.length <= 2 * 1024 * 1024) {
-                selected.imageDataUrl = `data:image/jpeg;base64,${frame.toString('base64')}`; preparedImageCount += 1;
+                selected.imageDataUrl = `data:image/jpeg;base64,${frame.toString('base64')}`; preparedImageCount += 1; preparedBytes += frame.length;
               }
             }
           } catch (error) {
             if (error?.code === 'VERSION_CONFLICT') throw error;
+            preparationFailures += 1;
             // Missing local FFmpeg or an unsupported video is a safe local fallback.
           }
         }
         selectedMedia.push(selected);
       }
+      const preparationElapsedMs = Math.max(0, Math.round(performance.now() - preparationStarted));
       const generated = await creatorAgent.createPlan({ ownerId, taskId, project: structuredClone(project), requestText: input.request_text.trim(),
         media: selectedMedia, revision: Boolean(project.creator_plan), privacyConsentId: input.privacy_consent_id ?? null });
+      if (input.privacy_consent_id) generated.generation.diagnostic = { ...(generated.generation.diagnostic ?? {}),
+        preparation_elapsed_ms: preparationElapsedMs,
+        prepared_samples: preparedImageCount, prepared_bytes: preparedBytes, preparation_failures: preparationFailures };
       if (task.current_version !== expectedVersion || task.active_job_id) throw apiError(409, 'VERSION_CONFLICT', '기획 생성 중 콘텐츠 버전이 변경되었습니다.');
       for (const approval of Object.values(this.state.data.approvals)) if (approval.task_id === taskId && approval.status === 'active') approval.status = 'invalidated';
       for (const checkpoint of Object.values(this.state.data.checkpoints)) if (checkpoint.task_id === taskId && ['pending', 'approved'].includes(checkpoint.status)) checkpoint.status = 'invalidated';
@@ -606,12 +614,17 @@ export class LocalRepositories {
       checkpoint: publicCheckpoint(checkpoint), generation: structuredClone(project.creator_generation ?? { source: 'local_rules', fallback_used: true, llm_calls: 0, estimated_cost_usd: 0 }) };
   }
 
-  updateCreatorScenes(ownerId, taskId, input, idempotencyKey) {
+  updateCreatorScenes(ownerId, taskId, input, idempotencyKey, cachedTrend = null) {
     const task = this.state.data.tasks[taskId];
     const project = task && this.state.data.projects[task.project_id];
     if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '작업을 찾을 수 없습니다.');
     if (!project.creator_plan || task.active_job_id) throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 기획을 수정할 수 없습니다.');
-    if (!isValidIdempotencyKey(idempotencyKey) || !input || Object.keys(input).some((key) => !['content_version', 'content_hash', 'scenes'].includes(key)) ||
+    if (!isValidIdempotencyKey(idempotencyKey) || !input || Object.keys(input).some((key) => !['content_version', 'content_hash', 'scenes', 'trend_query'].includes(key)) ||
+        (input.trend_query !== undefined && input.trend_query !== null &&
+          (typeof input.trend_query !== 'object' || Array.isArray(input.trend_query) ||
+            Object.keys(input.trend_query).some((key) => !['topic', 'days'].includes(key)) ||
+            !['restaurant', 'cafe', 'travel'].includes(input.trend_query.topic) ||
+            !Number.isInteger(input.trend_query.days) || input.trend_query.days < 1 || input.trend_query.days > 90)) ||
         !Number.isSafeInteger(input.content_version) || typeof input.content_hash !== 'string' || !Array.isArray(input.scenes) ||
         input.scenes.length !== project.media_ids.length || new Set(input.scenes.map((scene) => scene?.media_id)).size !== project.media_ids.length ||
         input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['media_id', 'duration_seconds', 'trim_start_seconds', 'trim_end_seconds', 'framing', 'motion', 'transition', 'subtitle_style', 'bgm_mood', 'edit_reason'].includes(key)) ||
@@ -629,6 +642,9 @@ export class LocalRepositories {
     const fingerprint = JSON.stringify(input); const prior = this.state.data.idempotency[key];
     if (prior) { if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '이미 사용한 요청 키입니다.'); return structuredClone(prior.result); }
     if (input.content_version !== task.current_version || input.content_hash !== task.content_hash) throw apiError(409, 'VERSION_CONFLICT', '현재 버전을 다시 확인해 주세요.');
+    const trendReference = input.trend_query ? summarizeTrend(cachedTrend) : null;
+    if (input.trend_query && (!trendReference || trendReference.topic !== input.trend_query.topic ||
+        trendReference.period_days !== input.trend_query.days)) throw apiError(409, 'TREND_CACHE_MISSING', '최근 검색 결과가 만료되었거나 관련성이 낮습니다. 검색 후 다시 확인해 주세요.');
     const previous = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id, scene]));
     const captions = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id,
       (project.caption_draft ?? []).filter((caption) => captionScene(caption, [scene]))]));
@@ -644,6 +660,13 @@ export class LocalRepositories {
     project.media_ids = input.scenes.map((scene) => scene.media_id);
     project.media_manifest = project.media_ids.map((mediaId, index) => ({ order: index + 1, media_id: mediaId, sha256: this.state.data.media[mediaId].sha256 }));
     project.creator_plan.scenes = scenes;
+    if (Array.isArray(project.creator_plan.media_insights)) {
+      const insightById = new Map(project.creator_plan.media_insights.map((insight) => [insight.media_id, insight]));
+      project.creator_plan.media_insights = project.media_ids.map((mediaId) => insightById.get(mediaId)).filter(Boolean);
+    }
+    project.creator_plan.recommended_media_order = [...project.media_ids];
+    if (input.trend_query === null) delete project.creator_plan.trend_reference;
+    else if (trendReference) project.creator_plan.trend_reference = trendReference;
     project.caption_draft = scenes.flatMap((scene) => {
       const original = previous.get(scene.media_id);
       return (captions.get(scene.media_id) ?? []).map((caption) => ({
