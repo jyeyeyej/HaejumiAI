@@ -6,5 +6,8 @@
   "scripts": {
     "test": "node --test backend/tests/*.test.js",
     "start": "node backend/src/adapters/node-http/server.js"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
   }
 }
