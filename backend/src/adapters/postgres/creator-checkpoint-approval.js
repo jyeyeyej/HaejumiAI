@@ -19,7 +19,8 @@ const transitions = {
 };
 
 export async function approveCreatorCheckpoint(pool, {
-  ownerId, taskId, checkpointId, contentVersion, contentHash
+  ownerId, taskId, checkpointId, contentVersion, contentHash,
+  idempotencyKey
 }) {
   const client = await pool.connect();
 
@@ -38,6 +39,50 @@ export async function approveCreatorCheckpoint(pool, {
     }
 
     const task = taskResult.rows[0];
+
+    if (typeof idempotencyKey !== 'string' ||
+        !idempotencyKey.trim()) {
+      throw new Error('VALIDATION_ERROR');
+    }
+
+    const requestKey = `${ownerId}:approval:${idempotencyKey}`;
+
+    const fingerprint = JSON.stringify({
+      task_id: taskId,
+      checkpoint_id: checkpointId,
+      content_version: contentVersion,
+      content_hash: contentHash,
+      approval_scope: 'continue'
+    });
+
+    const priorResult = await client.query(
+      `SELECT approval_id, fingerprint
+       FROM haejumi_dev.creator_approval_idempotency
+       WHERE request_key = $1`,
+      [requestKey]
+    );
+
+    if (priorResult.rowCount > 0) {
+      const prior = priorResult.rows[0];
+
+      if (prior.fingerprint !== fingerprint) {
+        throw new Error('IDEMPOTENCY_CONFLICT');
+      }
+
+      const existing = await client.query(
+        `SELECT approval_data
+         FROM haejumi_dev.creator_approvals
+         WHERE approval_id = $1 AND task_id = $2`,
+        [prior.approval_id, taskId]
+      );
+
+      if (existing.rowCount !== 1) {
+        throw new Error('INVALID_STATE_TRANSITION');
+      }
+
+      await client.query('COMMIT');
+      return existing.rows[0].approval_data;
+    }
 
     const checkpointResult = await client.query(
       `SELECT * FROM haejumi_dev.creator_checkpoints
@@ -203,6 +248,13 @@ export async function approveCreatorCheckpoint(pool, {
       ]
     );
 
+    await client.query(
+      `INSERT INTO haejumi_dev.creator_approval_idempotency
+       (request_key, owner_id, fingerprint, approval_id)
+       VALUES ($1, $2, $3, $4)`,
+      [requestKey, ownerId, fingerprint, approvalId]
+    );
+
     await client.query('COMMIT');
     return approval;
 
@@ -212,6 +264,16 @@ export async function approveCreatorCheckpoint(pool, {
     } catch {
       // 원래 오류를 유지합니다.
     }
+
+    if (
+      error.code === '23505' &&
+      error.constraint === 'creator_approval_idempotency_pkey'
+    ) {
+      const conflict = new Error('IDEMPOTENCY_CONFLICT');
+      conflict.code = 'IDEMPOTENCY_CONFLICT';
+      throw conflict;
+    }
+
     throw error;
   } finally {
     client.release();
