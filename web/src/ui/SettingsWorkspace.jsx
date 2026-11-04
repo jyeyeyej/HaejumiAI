@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { visionAvailability } from '../vision-availability.js';
 
 export function SettingsWorkspace({ api, onConsentChange }) {
   const [usage, setUsage] = useState(null);
@@ -25,6 +26,7 @@ export function SettingsWorkspace({ api, onConsentChange }) {
   return <section className="card workspace-card"><p className="eyebrow">SETTINGS</p><h1>외부 AI와 개인정보</h1>
     <p role="status" className="notice">{message}</p>
     <p>OpenAI 외부 호출: <strong>{usage?.enabled && usage?.provider_ready ? '서버에서 사용 가능' : '서버에서 비활성'}</strong></p>
+    <p className="muted">{visionAvailability(usage).message}</p>
     <p className="muted">동의만으로 서버 실행 설정이 켜지지 않습니다. 실제 유료 호출은 별도 승인 후 서버 운영자가 활성화해야 합니다.</p>
     {usage && <p>오늘 예약 비용 ${usage.daily_reserved_usd.toFixed(3)} / ${usage.daily_limit_usd.toFixed(3)} · 이번 달 예약 비용 ${usage.monthly_reserved_usd.toFixed(3)} / ${usage.monthly_limit_usd.toFixed(3)} · 작업당 최대 {usage.max_calls_per_task}회</p>}
     <p className="muted">표시된 금액은 사전 예약 추정치이며 공급자의 실제 청구 금액이 아닙니다.</p>

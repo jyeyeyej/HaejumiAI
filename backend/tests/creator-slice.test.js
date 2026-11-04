@@ -57,7 +57,7 @@ async function fixture(t, rendererFactory = null) {
 function headers(token = tokenA) { return { authorization: `Bearer ${token}` }; }
 
 test('mixed multi upload retains staged parts, validates ordered manifest, and creates one owner-scoped project', async (t) => {
-  const { base } = await fixture(t);
+  const { base, repositories } = await fixture(t);
   const types = [
     { name: 'one.png', type: 'image/png', bytes: makePng() },
     { name: 'two.mp4', type: 'video/mp4', bytes: makeMp4Structure() },
@@ -118,6 +118,7 @@ test('mixed multi upload retains staged parts, validates ordered manifest, and c
   assert.deepEqual(edited.plan.scenes.map((scene) => scene.media_id), reversed);
   assert.equal(edited.plan.scenes[0].framing, 'blur_pad');
   assert.equal(edited.plan.scenes[0].motion, 'zoom_in');
+  assert.deepEqual(repositories.state.data.projects[project.project_id].caption_draft, [], 'scene reorder must not invent subtitles for a local plan');
   assert.equal((await fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...json, 'idempotency-key': 'multi-stale-approve-0001' },
     body: JSON.stringify({ checkpoint_id: generated.checkpoint.checkpoint_id, content_version: generated.content_version,
       content_hash: generated.content_hash, approval_scope: 'continue' }) })).status, 409);
@@ -254,6 +255,8 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   const revised = await revision.json();
   assert.equal(revised.content_version, 3);
   assert.equal(revised.checkpoint.status, 'pending');
+  assert.deepEqual(repositories.state.data.projects[project.project_id].media_ids, [mediaId], 'existing project media must be reused without upload');
+  assert.equal(repositories.state.data.projects[project.project_id].caption_draft.some((caption) => /장면\s*\d+을 소개합니다|차분하게 수정/u.test(caption.text)), false);
   assert.ok(Object.values(repositories.state.data.approvals).filter((item) => item.task_id === project.task_id).every((item) => item.status === 'invalidated'));
   assert.equal(mockLLM.calls, 2);
   const revisionReplay = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'creator-plan-revision-key-1' }, body: JSON.stringify({
@@ -270,6 +273,64 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.equal((await nonCreator.json()).agent_id, 'schedule');
   const ambiguous = await fetch(`${base}/assistant/messages`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'assistant-ambiguous-route-key' }, body: JSON.stringify({ text: '오늘 일정 정리해서 일기 써줘' }) });
   assert.equal((await ambiguous.json()).status, 'needs_clarification');
+});
+
+test('existing synthetic travel project recovers scene-only Vision captions after plan approval', async (t) => {
+  const { base, mockLLM } = await fixture(t);
+  const { project, mediaId } = await prepareUnapprovedProject(base, 5112);
+  const originalGenerate = mockLLM.generateStructured.bind(mockLLM);
+  mockLLM.generateStructured = async (context) => {
+    const output = await originalGenerate(context);
+    if (Array.isArray(context.input?.media)) {
+      output.captions = [];
+      output.plan.scenes[0].caption_text = '길 위의 조용한 순간';
+      delete output.plan.media_insights;
+    }
+    return output;
+  };
+  const jsonHeaders = { ...headers(), 'content-type': 'application/json' };
+  const local = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...jsonHeaders, 'idempotency-key': 'travel-local-plan-0001' },
+    body: JSON.stringify({ content_version: 1, request_text: '여행 쇼츠를 만들어줘' }) });
+  assert.equal(local.status, 201);
+  assert.equal((await local.json()).generation.source, 'local_rules');
+  assert.equal(mockLLM.calls, 0);
+  const notice = await fetch(`${base}/privacy/processing-notice?provider_id=openai&purpose=vision_analysis`, { headers: headers() }).then((r) => r.json());
+  const consentResponse = await fetch(`${base}/privacy/consents`, { method: 'POST', headers: { ...jsonHeaders, 'idempotency-key': 'travel-vision-consent-0001' },
+    body: JSON.stringify({ provider_id: 'openai', purpose: 'vision_analysis', data_categories: notice.data_categories, resource_ids: [mediaId],
+      notice_id: notice.notice_id, notice_version: notice.notice_version, explicitly_confirmed: true, expires_at: new Date(Date.now() + 60_000).toISOString() }) });
+  assert.equal(consentResponse.status, 201);
+  const consent = await consentResponse.json();
+  const vision = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST', headers: { ...jsonHeaders, 'idempotency-key': 'travel-vision-plan-0001' },
+    body: JSON.stringify({ content_version: 2, request_text: '차분한 여행 영상으로 구성해 줘', privacy_consent_id: consent.consent_id }) });
+  assert.equal(vision.status, 201);
+  const planned = await vision.json();
+  assert.equal(planned.generation.source, 'mock');
+  assert.equal(planned.generation.fallback_used, true);
+  assert.equal(mockLLM.calls, 1);
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() })).status, 409);
+  const approve = async (checkpoint, key) => fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...jsonHeaders, 'idempotency-key': key },
+    body: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id, content_version: checkpoint.content_version,
+      content_hash: checkpoint.content_hash, approval_scope: 'continue' }) });
+  assert.equal((await approve(planned.checkpoint, 'travel-plan-approve-0001')).status, 201);
+  const draft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.deepEqual(draft.captions.map((caption) => caption.text), ['길 위의 조용한 순간']);
+  assert.equal(draft.captions[0].start_seconds, 0);
+  assert.equal(draft.captions[0].end_seconds, 3.5);
+  assert.equal((await approve(draft.checkpoint, 'travel-draft-approve-0001')).status, 201);
+  const edited = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: { ...jsonHeaders, 'idempotency-key': 'travel-caption-edit-0001' },
+    body: JSON.stringify({ content_version: planned.content_version, content_hash: planned.content_hash,
+      captions: [{ order: 1, start_seconds: 0.4, end_seconds: 2.8, text: '길 위의 새로운 순간' }], captions_enabled: true,
+      music_track_id: null, source_volume: 1, music_volume: 0.25, fade_in_seconds: 1, fade_out_seconds: 1 }) });
+  assert.equal(edited.status, 200);
+  const revised = await edited.json();
+  assert.equal(revised.content_version, planned.content_version + 1);
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}/render`, { method: 'POST', headers: { ...jsonHeaders, 'idempotency-key': 'travel-stale-render-0001' },
+    body: JSON.stringify({ content_version: planned.content_version, content_hash: planned.content_hash }) })).status, 409);
+  assert.equal((await approve(revised.checkpoint, 'travel-replan-approve-0001')).status, 201);
+  const revisedDraft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.deepEqual(revisedDraft.captions.map((caption) => [caption.start_seconds, caption.end_seconds, caption.text]),
+    [[0.4, 2.8, '길 위의 새로운 순간']]);
+  assert.equal((await approve(revisedDraft.checkpoint, 'travel-redraft-approve-0001')).status, 201);
 });
 
 test('selected upload, completion, project creation and task status form the first Creator slice', async (t) => {
@@ -675,7 +736,7 @@ test('caption and music edits version the task and unverified platform rights bl
   assert.equal((await uploaded.json()).status, 'available');
   assert.equal((await fetch(`${base}/music/tracks`, { headers: headers(tokenB) }).then((r) => r.json())).items.length, 0);
 
-  const edit = { content_version: project.current_version, content_hash: project.content_hash, captions: [{ order: 1, start_seconds: 0, end_seconds: 3, text: '안녕하세요' }], captions_enabled: true,
+  const edit = { content_version: project.current_version, content_hash: project.content_hash, captions: [{ order: 1, start_seconds: 0.3, end_seconds: 2.5, text: '안녕하세요' }], captions_enabled: true,
     music_track_id: track.track_id, source_volume: 0.5, music_volume: 0.3, fade_in_seconds: 1, fade_out_seconds: 1 };
   const editHeaders = { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'draft-edit-test-0001' };
   const response = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH', headers: editHeaders, body: JSON.stringify(edit) });
@@ -693,6 +754,8 @@ test('caption and music edits version the task and unverified platform rights bl
   assert.equal((await approve(revised.checkpoint, 'edit-plan-approval-0001')).status, 201);
   const draft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
   assert.equal(draft.captions[0].text, '안녕하세요');
+  assert.equal(draft.captions[0].start_seconds, 0.3);
+  assert.equal(draft.captions[0].end_seconds, 2.5);
   assert.equal((await approve(draft.checkpoint, 'edit-draft-approval-0001')).status, 201);
   const rendered = await fetch(`${base}/tasks/${project.task_id}/render`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': 'edited-draft-render-0001' }, body: JSON.stringify({ content_version: 2, content_hash: revised.content_hash }) });
   assert.equal(rendered.status, 202);
@@ -764,7 +827,7 @@ test('real Creator API renders an approved Korean caption and selected local mus
   const approve = async (checkpoint, key) => fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...headers(), 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id, content_version: checkpoint.content_version, content_hash: checkpoint.content_hash, approval_scope: 'continue' }) });
   assert.equal((await approve(plan.checkpoint, 'real-initial-plan-approval-001')).status, 201);
   const initialDraft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
-  assert.ok(initialDraft.captions.length);
+  assert.deepEqual(initialDraft.captions, [], 'local fallback must leave visual captions for the user to write');
   const audioPath = join(repositories.dataDir, 'synthetic-test-tone.wav');
   execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '3', '-c:a', 'pcm_s16le', audioPath], { windowsHide: true });
   const audio = readFileSync(audioPath);

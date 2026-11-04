@@ -12,7 +12,7 @@ const seoulDate = () => {
   return `${value.year}-${value.month}-${value.day}`;
 };
 
-export function createApiHandler({ repositories, auth, webSessions = null, maxMediaBytes, renderCoordinator = null, capabilityRegistry = null, supervisorRouter = null, creatorAgent = null, llmGateway = null, trends = null }) {
+export function createApiHandler({ repositories, auth, webSessions = null, maxMediaBytes, renderCoordinator = null, capabilityRegistry = null, supervisorRouter = null, creatorAgent = null, llmGateway = null, llmAvailability = null, trends = null }) {
   const personal = new PersonalRecords(repositories.state);
   const localAssistant = new LocalAssistant(repositories.state, personal);
   const localBackups = repositories.dataDir ? new LocalBackups(repositories.dataDir) : null;
@@ -195,6 +195,7 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
         const usage = llmGateway?.usage;
         const limits = llmGateway?.limits;
         return sendJson(response, 200, { enabled: llmGateway?.enabled === true, provider_ready: Boolean(llmGateway?.provider),
+          availability_reason: llmAvailability?.reason ?? (llmGateway?.enabled && llmGateway?.provider ? 'READY' : 'UNAVAILABLE'),
           day: usage?.day ?? null, month: usage?.month ?? null, daily_reserved_usd: usage?.dailyUsd ?? 0,
           monthly_reserved_usd: usage?.monthlyUsd ?? 0, daily_limit_usd: limits?.dailyUsd ?? 0,
           monthly_limit_usd: limits?.monthlyUsd ?? 0, max_calls_per_task: limits?.maxCallsPerTask ?? 0 });

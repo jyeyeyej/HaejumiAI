@@ -43,6 +43,28 @@ test('caption input cannot inject ASS overrides or exceed safe layout', () => {
   assert.throws(() => buildAss([{ order: 1, start_seconds: 0, end_seconds: 3, text: '가'.repeat(81) }], 3), { code: 'VALIDATION_ERROR' });
 });
 
+test('real FFmpeg displays two short Korean captions only in their selected intervals', { skip: !installed, timeout: 120000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'haejumi-caption-times-'));
+  t.after(() => { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true }); });
+  const mediaRoot = join(root, 'media'); const outputRoot = join(root, 'renders'); mkdirSync(mediaRoot); mkdirSync(outputRoot);
+  const image = join(mediaRoot, 'black.jpg');
+  const ff = (...args) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...args], { windowsHide: true, maxBuffer: 12 * 1024 * 1024 });
+  ff('-f', 'lavfi', '-i', 'color=c=black:s=640x360', '-frames:v', '1', image);
+  const mediaId = randomUUID();
+  const scenes = [{ order: 1, media_id: mediaId, start_seconds: 0, end_seconds: 3 }];
+  const captions = [{ order: 1, start_seconds: 0.5, end_seconds: 1, text: '첫 번째 순간' },
+    { order: 2, start_seconds: 2, end_seconds: 2.5, text: '다음 장면으로' }];
+  const result = await createFFmpegRenderer({ mediaRoot, outputRoot }).render({
+    mediaItems: [{ mediaId, mediaType: 'image/jpeg', fileName: 'black.jpg', storageKey: 'black.jpg' }],
+    scenes, captions, targetSeconds: 3, framing: 'fit_pad', projectId: randomUUID(), version: 1 });
+  assert.equal(result.verified, true);
+  const bright = (time) => ff('-ss', String(time), '-i', result.output_path, '-vf', 'crop=864:200:108:1336,format=gray', '-frames:v', '1', '-f', 'rawvideo', 'pipe:1').filter((value) => value > 180).length;
+  assert.ok(bright(0.75) > bright(0.2) + 40);
+  assert.ok(bright(1.5) < bright(0.75) - 40);
+  assert.ok(bright(2.2) > bright(1.5) + 40);
+  assert.ok(bright(2.8) < bright(2.2) - 40);
+});
+
 test('real FFmpeg burns Korean captions and mixes original and music with fades', { skip: !installed, timeout: 120000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'haejumi-composition-test-'));
   if (process.env.HAEJUMI_KEEP_SYNTHETIC_TEST_OUTPUT !== '1') t.after(() => {
@@ -67,11 +89,13 @@ test('real FFmpeg burns Korean captions and mixes original and music with fades'
         media_insights: [{ media_id: mediaId, description: '합성 테스트 화면입니다.', mood: '밝음', subjects: [], usable_detail: '색상', uncertainty: '', category: 'other', orientation: 'landscape' }],
         scenes: [{ order: 1, media_id: mediaId, media_type: 'video/mp4', start_seconds: 0, end_seconds: 3,
           visual_direction: '합성 화면을 사용합니다.', caption_text: captionText }] },
-      captions: [{ order: 1, start_seconds: 0, end_seconds: 3, text: captionText }],
+      captions: [], // Simulate a partial Vision response with only the scene's caption field.
     } }) } }).createPlan({ ownerId: 'synthetic-owner', taskId: 'synthetic-task', project: { target_seconds: 3 },
     media: [{ mediaId, mediaType: 'video/mp4', imageDataUrl: 'data:image/jpeg;base64,c3ludGhldGlj' }],
     requestText: '밝은 분위기', privacyConsentId: 'synthetic-consent' });
   assert.equal(aiDraft.generation.source, 'mock');
+  assert.equal(aiDraft.generation.fallback_used, true);
+  assert.deepEqual(aiDraft.captions.map((caption) => caption.text), [captionText]);
   const result = await renderer.render({ mediaItems: [{ mediaId, mediaType: 'video/mp4', fileName: 'source.mp4', storageKey: 'source.mp4' }], targetSeconds: 3, framing: 'fit_pad', projectId: randomUUID(), version: 1,
     captions: aiDraft.captions, musicPath: music,
     composition: { captions_enabled: true, source_volume: 0.8, music_volume: 0.6, fade_in_seconds: 0.5, fade_out_seconds: 0.5 } });

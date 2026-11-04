@@ -4,8 +4,9 @@ import { resolve } from 'node:path';
 import { canonicalManifestBytes, extensionMatches, isAllowedMediaType, isSafeDisplayName, sha256, validateMediaBytes } from '../../security/media-validation.js';
 import { ensureStorageDirectory, safeStoragePath } from '../../security/storage-paths.js';
 import { MusicLibrary } from '../../security/music-library.js';
-import { CAPTION_FONT_SHA256, CAPTION_TEXT_PATTERN } from '../../media-engine/caption-font.js';
+import { CAPTION_FONT_SHA256 } from '../../media-engine/caption-font.js';
 import { validSceneEffects } from '../../media-engine/scene-effects.js';
+import { captionScene, validCaptionTimeline } from '../../media-engine/caption-timeline.js';
 
 export const PRIVACY_NOTICE_ID = '610ef7d0-c730-4de0-b24c-5b80e9241d11';
 export const PRIVACY_NOTICE_VERSION = '1';
@@ -447,7 +448,7 @@ export class LocalRepositories {
       throw apiError(409, 'INVALID_STATE_TRANSITION', '같은 기획 요청을 처리 중입니다.');
     }
     if (input.content_version !== task.current_version) throw apiError(409, 'VERSION_CONFLICT', '요청한 콘텐츠 버전이 최신 버전과 다릅니다.');
-    if (!['waiting_plan_approval', 'waiting_draft_approval', 'render_ready', 'render_simulated', 'waiting_preview_approval', 'preview_approved'].includes(task.status) || task.active_job_id) {
+    if (!['waiting_plan_approval', 'waiting_draft_approval', 'render_ready', 'render_simulated', 'waiting_preview_approval', 'preview_approved', 'failed'].includes(task.status) || task.active_job_id) {
       throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 작업 상태에서는 기획을 생성하거나 수정할 수 없습니다.');
     }
     const expectedVersion = task.current_version;
@@ -552,9 +553,8 @@ export class LocalRepositories {
           r.platforms.some((p) => !['youtube', 'instagram', 'tiktok'].includes(p)) || typeof r.evidence !== 'string' || r.evidence.length > 4000 ||
           typeof r.attribution_required !== 'boolean' || typeof r.required_attribution !== 'string' || r.required_attribution.length > 2000 ||
           (r.explicitly_verified && (!r.commercial_allowed || !r.platforms.length || !r.evidence.trim() || (r.attribution_required && !r.required_attribution.trim())))) ||
-        input.captions.some((c, i) => !c || Object.keys(c).some((k) => !['order', 'start_seconds', 'end_seconds', 'text'].includes(k)) || c.order !== i + 1 ||
-          !Number.isFinite(c.start_seconds) || !Number.isFinite(c.end_seconds) || c.start_seconds < 0 || c.start_seconds >= c.end_seconds || c.end_seconds > project.target_seconds ||
-          typeof c.text !== 'string' || [...c.text].length > 80 || !CAPTION_TEXT_PATTERN.test(c.text))) {
+        input.captions.some((c) => !c || Object.keys(c).some((k) => !['order', 'start_seconds', 'end_seconds', 'text'].includes(k))) ||
+        !validCaptionTimeline(input.captions, project.creator_plan?.scenes, project.target_seconds, project.plan_request ?? '')) {
       throw apiError(422, 'VALIDATION_ERROR', '자막 또는 오디오 설정을 확인해 주세요.');
     }
     const key = `${ownerId}:draft-edit:${taskId}:${idempotencyKey}`;
@@ -630,7 +630,8 @@ export class LocalRepositories {
     if (prior) { if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '이미 사용한 요청 키입니다.'); return structuredClone(prior.result); }
     if (input.content_version !== task.current_version || input.content_hash !== task.content_hash) throw apiError(409, 'VERSION_CONFLICT', '현재 버전을 다시 확인해 주세요.');
     const previous = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id, scene]));
-    const captions = new Map((project.caption_draft ?? []).map((caption, index) => [project.creator_plan.scenes[index]?.media_id, caption]));
+    const captions = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id,
+      (project.caption_draft ?? []).filter((caption) => captionScene(caption, [scene]))]));
     let start = 0;
     const scenes = input.scenes.map((item, index) => {
       const end = index === input.scenes.length - 1 ? project.target_seconds : Math.round((start + item.duration_seconds) * 100) / 100;
@@ -643,8 +644,13 @@ export class LocalRepositories {
     project.media_ids = input.scenes.map((scene) => scene.media_id);
     project.media_manifest = project.media_ids.map((mediaId, index) => ({ order: index + 1, media_id: mediaId, sha256: this.state.data.media[mediaId].sha256 }));
     project.creator_plan.scenes = scenes;
-    project.caption_draft = scenes.map((scene, index) => ({ order: index + 1, start_seconds: scene.start_seconds, end_seconds: scene.end_seconds,
-      text: captions.get(scene.media_id)?.text ?? scene.caption_text }));
+    project.caption_draft = scenes.flatMap((scene) => {
+      const original = previous.get(scene.media_id);
+      return (captions.get(scene.media_id) ?? []).map((caption) => ({
+        start_seconds: Math.round((scene.start_seconds + (caption.start_seconds - original.start_seconds) * (scene.end_seconds - scene.start_seconds) / (original.end_seconds - original.start_seconds)) * 100) / 100,
+        end_seconds: Math.round((scene.start_seconds + (caption.end_seconds - original.start_seconds) * (scene.end_seconds - scene.start_seconds) / (original.end_seconds - original.start_seconds)) * 100) / 100,
+        text: caption.text }));
+    }).filter((caption) => caption.end_seconds > caption.start_seconds).map((caption, index) => ({ order: index + 1, ...caption }));
     project.current_version += 1; project.content_hash = this.contentHash(project); project.status = 'review_required'; delete project.video_reuse;
     for (const approval of Object.values(this.state.data.approvals)) if (approval.task_id === taskId && approval.status === 'active') approval.status = 'invalidated';
     for (const checkpoint of Object.values(this.state.data.checkpoints)) if (checkpoint.task_id === taskId && ['pending', 'approved'].includes(checkpoint.status)) checkpoint.status = 'invalidated';
@@ -972,6 +978,10 @@ export class LocalRepositories {
           checkpoint.content_version !== task.current_version || checkpoint.content_hash !== task.content_hash) {
         throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 버전에 연결된 기획·초안 중간 승인이 모두 필요합니다.');
       }
+    }
+    if (project.composition?.captions_enabled && !validCaptionTimeline(project.caption_draft ?? [], project.creator_plan?.scenes,
+      project.target_seconds, project.plan_request ?? '')) {
+      throw apiError(422, 'VALIDATION_ERROR', '기존 자막에 임시 문구·기획 지시문 또는 장면과 맞지 않는 시간이 있습니다. 자막을 수정하고 다시 승인해 주세요.');
     }
     const mediaItems = project.media_ids.map((id) => this.state.data.media[id]);
     if (mediaItems.some((item) => !item || item.ownerId !== ownerId || item.status !== 'available' || !item.storageKey)) throw apiError(404, 'RESOURCE_NOT_FOUND', '승인된 프로젝트 미디어를 찾을 수 없습니다.');

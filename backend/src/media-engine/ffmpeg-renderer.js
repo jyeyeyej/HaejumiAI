@@ -9,6 +9,7 @@ import { sceneVideoFilters, validSceneEffects } from './scene-effects.js';
 import { inspectRenderedVideo } from './ffprobe-validator.js';
 import { CAPTION_FONT_SHA256, CAPTION_TEXT_PATTERN } from './caption-font.js';
 import { sha256 } from '../security/media-validation.js';
+import { captionScene, validCaptionTimeline } from './caption-timeline.js';
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime']);
@@ -204,7 +205,7 @@ function resolveInput(mediaRoot, item) {
 }
 
 export function buildAss(captions, duration, scenes = null) {
-  if (!Array.isArray(captions) || captions.length > 30) throw renderError('VALIDATION_ERROR', '자막을 확인해 주세요.');
+  if (!validCaptionTimeline(captions, scenes, duration)) throw renderError('VALIDATION_ERROR', '자막 문구와 장면별 시간을 확인해 주세요.');
   const stamp = (seconds) => {
     const centiseconds = Math.round(seconds * 100);
     const h = Math.floor(centiseconds / 360000); const m = Math.floor(centiseconds / 6000) % 60;
@@ -216,7 +217,8 @@ export function buildAss(captions, duration, scenes = null) {
         typeof c.text !== 'string' || [...c.text].length > 80 || !CAPTION_TEXT_PATTERN.test(c.text)) throw renderError('VALIDATION_ERROR', '자막 길이 또는 시간을 확인해 주세요.');
     const chars = [...c.text.replace(/\\/g, '＼').replace(/\{/g, '｛').replace(/\}/g, '｝')];
     const wrapped = []; for (let i = 0; i < chars.length; i += 20) wrapped.push(chars.slice(i, i + 20).join(''));
-    const style = scenes?.[index]?.subtitle_style === 'emphasis' ? 'Emphasis' : scenes?.[index]?.subtitle_style === 'information' ? 'Information' : 'Default';
+    const scene = captionScene(c, scenes);
+    const style = scene?.subtitle_style === 'emphasis' ? 'Emphasis' : scene?.subtitle_style === 'information' ? 'Information' : 'Default';
     return `Dialogue: 0,${stamp(c.start_seconds)},${stamp(c.end_seconds)},${style},,0,0,0,,${wrapped.join('\\N')}`;
   });
   return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Noto Sans KR,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,108,108,384,1\nStyle: Emphasis,Noto Sans KR,52,&H0000FFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,1,2,108,108,384,1\nStyle: Information,Noto Sans KR,38,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,8,108,108,320,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;

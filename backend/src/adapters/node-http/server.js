@@ -7,6 +7,7 @@ import { WebSessions } from '../filesystem/web-sessions.js';
 import { LocalRepositories } from '../filesystem/repositories.js';
 import { createApiHandler } from './transport.js';
 import { loadDotEnv } from '../../config/dotenv.js';
+import { resolveLlmAvailability } from '../../config/llm-availability.js';
 import { ensureStorageDirectory, safeStoragePath } from '../../security/storage-paths.js';
 import { createRenderCoordinator } from '../../application/render-coordinator.js';
 import { createFFmpegRenderer } from '../../media-engine/ffmpeg-renderer.js';
@@ -42,9 +43,12 @@ const maxVisionImages = parseInteger(process.env.HAEJUMI_OPENAI_MAX_IMAGES_PER_A
 if (maxVisionImages < 1 || maxVisionImages > 20) throw new Error('Invalid HAEJUMI_OPENAI_MAX_IMAGES_PER_ANALYSIS.');
 // Loading a key never grants permission to make a paid request. The additional
 // switch is intentionally absent from existing installations and defaults off.
-const llmEnabled = parseBoolean(process.env.HAEJUMI_LLM_ENABLED, false) && parseBoolean(process.env.HAEJUMI_OPENAI_LIVE_ENABLED, false);
+const llmRequested = parseBoolean(process.env.HAEJUMI_LLM_ENABLED, false);
+const liveEnabled = parseBoolean(process.env.HAEJUMI_OPENAI_LIVE_ENABLED, false);
 const openAiKey = process.env.HAEJUMI_OPENAI_API_KEY || process.env.OPENAI_API_KEY || '';
 const openAiModel = process.env.HAEJUMI_OPENAI_MODEL || process.env.OPENAI_MODEL || '';
+const llmAvailability = resolveLlmAvailability({ llmRequested, liveEnabled, keyConfigured: Boolean(openAiKey), modelConfigured: Boolean(openAiModel) });
+const llmEnabled = llmAvailability.enabled;
 const openAiProvider = llmEnabled && openAiKey && openAiModel ? new OpenAIProvider({ apiKey: openAiKey, model: openAiModel,
   timeoutMs: parseInteger(process.env.HAEJUMI_OPENAI_TIMEOUT_MS, 20_000),
   maxImages: maxVisionImages,
@@ -84,7 +88,7 @@ const auth = {
   },
 };
 
-const server = createServer(createApiHandler({ repositories, auth, webSessions, maxMediaBytes, renderCoordinator, capabilityRegistry, supervisorRouter, creatorAgent, llmGateway, trends }));
+const server = createServer(createApiHandler({ repositories, auth, webSessions, maxMediaBytes, renderCoordinator, capabilityRegistry, supervisorRouter, creatorAgent, llmGateway, llmAvailability, trends }));
 server.listen(Number(process.env.HAEJUMI_PORT || 8765), host, () => {
   process.stdout.write(`Haejumi reference backend listening on http://${host}:${server.address().port}\n`);
 });
