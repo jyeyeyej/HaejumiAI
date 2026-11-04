@@ -12,8 +12,12 @@ export class SupervisorRouter {
 
   route(text) {
     if (typeof text !== 'string' || !text.trim()) return { status: 'needs_clarification', module_id: null, capability_id: null, reason: 'empty_request' };
+    if (/(기분|감정|우울|힘들|슬프|속상|걱정|외롭|안녕|고마워|감사해)/.test(text) &&
+        !/(기록|저장|등록|조회|요약|작성|일기|쇼츠|영상|일정\s*(?:추가|확인|알려))/.test(text)) {
+      return { status: 'conversation', module_id: null, capability_id: null, reason: 'personal_talk' };
+    }
     const hits = RULES.filter((rule) => rule.patterns.some((pattern) => pattern.test(text)));
-    if (hits.length === 0) return { status: 'needs_clarification', module_id: null, capability_id: null, reason: 'no_matching_capability' };
+    if (hits.length === 0) return { status: 'conversation', module_id: null, capability_id: null, reason: 'free_talk' };
     if (hits.length > 1) return { status: 'needs_clarification', module_id: null, capability_id: null, reason: 'ambiguous_request', candidates: hits.map((hit) => hit.module_id) };
     const module = this.registry.get(hits[0].module_id);
     const capability = module?.capability_ids[0] ?? null;

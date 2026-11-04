@@ -4,7 +4,8 @@ import { basename, extname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ensureStorageDirectory, safeStoragePath } from '../security/storage-paths.js';
-import { captionSafeArea, validateRenderOptions, videoFilter } from './video-profile.js';
+import { captionSafeArea, validateRenderOptions } from './video-profile.js';
+import { sceneVideoFilters, validSceneEffects } from './scene-effects.js';
 import { inspectRenderedVideo } from './ffprobe-validator.js';
 import { CAPTION_FONT_SHA256, CAPTION_TEXT_PATTERN } from './caption-font.js';
 import { sha256 } from '../security/media-validation.js';
@@ -53,10 +54,10 @@ export function createFFmpegRenderer({ mediaRoot, outputRoot, ffmpegPath = 'ffmp
           const font = fileURLToPath(new URL('../../assets/fonts/NotoSansKR-Regular.otf', import.meta.url));
           copyFileSync(font, join(temporaryDir, 'NotoSansKR-Regular.otf'), constants.COPYFILE_EXCL);
           if (sha256(readFileSync(join(temporaryDir, 'NotoSansKR-Regular.otf'))) !== CAPTION_FONT_SHA256) throw renderError('VALIDATION_ERROR', '자막 글꼴의 무결성을 확인할 수 없습니다.');
-          writeFileSync(join(temporaryDir, 'captions.ass'), buildAss(captions, targetSeconds), { flag: 'wx', mode: 0o600 });
+          writeFileSync(join(temporaryDir, 'captions.ass'), buildAss(captions, targetSeconds, scenes), { flag: 'wx', mode: 0o600 });
         }
         const args = reuseVideo ? buildAudioReuseArgs(inputs, reuseVideo.path, outputPath, { ...options, composition, musicPath, timeline }) :
-          buildRenderArgs(inputs, outputPath, { ...options, composition, musicPath, timeline, subtitleFile: temporaryDir ? 'captions.ass' : null });
+          buildRenderArgs(inputs, outputPath, { ...options, composition, musicPath, timeline, scenes, subtitleFile: temporaryDir ? 'captions.ass' : null });
         await runProcess(spawn, ffmpegPath, args, timeoutMs, 'RENDER_FAILED', signal, temporaryDir ?? undefined);
         if (signal?.aborted) throw renderError('JOB_CANCELLED', '렌더 작업이 취소되었습니다.');
         const verification = await inspectRenderedVideo({ spawn, ffprobePath, filePath: outputPath, timeoutMs, signal });
@@ -91,7 +92,9 @@ export function buildAudioReuseArgs(inputs, videoPath, outputPath, options) {
   if (!c || [c.source_volume, c.music_volume].some((v) => !Number.isFinite(v) || v < 0 || v > 2) ||
       [c.fade_in_seconds, c.fade_out_seconds].some((v) => !Number.isFinite(v) || v < 0 || v > 10 || v > normalized.targetSeconds / 2)) throw renderError('VALIDATION_ERROR', '오디오 설정을 확인해 주세요.');
   const args = ['-hide_banner', '-nostdin', '-y', '-i', videoPath]; let nextInput = 1;
-  const indices = inputs.map((input, index) => { if (!input.hasAudio) return null; if (options.timeline?.[index].trimStart) args.push('-ss', String(options.timeline[index].trimStart)); args.push('-i', input.path); return nextInput++; });
+  const indices = inputs.map((input, index) => { if (!input.hasAudio) return null; if (options.timeline?.[index].trimStart) args.push('-ss', String(options.timeline[index].trimStart));
+    if (options.timeline?.[index].trimEnd !== undefined) args.push('-t', String(options.timeline[index].trimEnd - options.timeline[index].trimStart));
+    args.push('-i', input.path); return nextInput++; });
   let musicIndex = null;
   if (options.musicPath) { musicIndex = nextInput++; args.push('-stream_loop', '-1', '-i', options.musicPath); }
   const filters = []; const labels = [];
@@ -120,6 +123,7 @@ export function buildRenderArgs(inputs, outputPath, options) {
     const segmentDuration = options.timeline?.[index].duration ?? secondsPerInput;
     if (input.kind === 'image') args.push('-loop', '1', '-framerate', '30', '-t', String(segmentDuration));
     if (input.kind === 'video' && options.timeline?.[index].trimStart) args.push('-ss', String(options.timeline[index].trimStart));
+    if (input.kind === 'video' && options.timeline?.[index].trimEnd !== undefined) args.push('-t', String(options.timeline[index].trimEnd - options.timeline[index].trimStart));
     args.push('-i', input.path);
   }
   const audioIndex = inputs.length;
@@ -127,12 +131,10 @@ export function buildRenderArgs(inputs, outputPath, options) {
   else if (options.musicPath) args.push('-stream_loop', '-1', '-i', options.musicPath);
   const filters = [];
   const labels = [];
-  const fit = videoFilter(normalized);
   inputs.forEach((input, index) => {
     const label = `v${index}`;
-    const duration = (options.timeline?.[index].duration ?? secondsPerInput).toFixed(6);
-    const tail = input.kind === 'video' ? `,tpad=stop_mode=clone:stop_duration=${duration}` : '';
-    filters.push(`[${index}:v]${fit},trim=duration=${duration}${tail},trim=duration=${duration},setpts=PTS-STARTPTS[${label}]`);
+    const duration = options.timeline?.[index].duration ?? secondsPerInput;
+    filters.push(...sceneVideoFilters(index, normalized, options.scenes?.[index], duration, input.kind));
     labels.push(`[${label}]`);
   });
   filters.push(`${labels.join('')}concat=n=${inputs.length}:v=1:a=0[video]`);
@@ -167,15 +169,18 @@ function validatedTimeline(inputs, scenes, targetSeconds) {
   if (!Array.isArray(scenes) || scenes.length !== inputs.length) throw renderError('VALIDATION_ERROR', '장면 목록을 확인해 주세요.');
   let previousEnd = 0;
   const timeline = scenes.map((scene, index) => {
-    if (!scene || scene.order !== index + 1 || scene.media_id !== inputs[index].mediaId ||
+    if (!scene || scene.order !== index + 1 || scene.media_id !== inputs[index].mediaId || !validSceneEffects(scene) ||
         !Number.isFinite(scene.start_seconds) || !Number.isFinite(scene.end_seconds) ||
         Math.abs(scene.start_seconds - previousEnd) > 0.01 || scene.end_seconds <= scene.start_seconds ||
         scene.end_seconds > targetSeconds + 0.01 ||
         (scene.trim_start_seconds !== undefined && (inputs[index].kind !== 'video' || !Number.isFinite(scene.trim_start_seconds) ||
-          scene.trim_start_seconds < 0 || scene.trim_start_seconds > 3600))) throw renderError('VALIDATION_ERROR', '장면 시간 또는 영상 구간을 확인해 주세요.');
+          scene.trim_start_seconds < 0 || scene.trim_start_seconds > 3600)) ||
+        (scene.trim_end_seconds !== undefined && (inputs[index].kind !== 'video' || !Number.isFinite(scene.trim_end_seconds) ||
+          scene.trim_end_seconds > 3600 || scene.trim_end_seconds - (scene.trim_start_seconds ?? 0) + 0.001 < scene.end_seconds - scene.start_seconds)))
+      throw renderError('VALIDATION_ERROR', '장면 시간 또는 영상 구간을 확인해 주세요.');
     const duration = scene.end_seconds - scene.start_seconds;
     previousEnd = scene.end_seconds;
-    return { duration, trimStart: scene.trim_start_seconds ?? 0 };
+    return { duration, trimStart: scene.trim_start_seconds ?? 0, ...(scene.trim_end_seconds === undefined ? {} : { trimEnd: scene.trim_end_seconds }) };
   });
   if (Math.abs(previousEnd - targetSeconds) > 0.01) throw renderError('VALIDATION_ERROR', '장면 길이 합계가 목표 길이와 다릅니다.');
   return timeline;
@@ -198,7 +203,7 @@ function resolveInput(mediaRoot, item) {
   return { path: filePath, kind };
 }
 
-export function buildAss(captions, duration) {
+export function buildAss(captions, duration, scenes = null) {
   if (!Array.isArray(captions) || captions.length > 30) throw renderError('VALIDATION_ERROR', '자막을 확인해 주세요.');
   const stamp = (seconds) => {
     const centiseconds = Math.round(seconds * 100);
@@ -211,9 +216,10 @@ export function buildAss(captions, duration) {
         typeof c.text !== 'string' || [...c.text].length > 80 || !CAPTION_TEXT_PATTERN.test(c.text)) throw renderError('VALIDATION_ERROR', '자막 길이 또는 시간을 확인해 주세요.');
     const chars = [...c.text.replace(/\\/g, '＼').replace(/\{/g, '｛').replace(/\}/g, '｝')];
     const wrapped = []; for (let i = 0; i < chars.length; i += 20) wrapped.push(chars.slice(i, i + 20).join(''));
-    return `Dialogue: 0,${stamp(c.start_seconds)},${stamp(c.end_seconds)},Default,,0,0,0,,${wrapped.join('\\N')}`;
+    const style = scenes?.[index]?.subtitle_style === 'emphasis' ? 'Emphasis' : scenes?.[index]?.subtitle_style === 'information' ? 'Information' : 'Default';
+    return `Dialogue: 0,${stamp(c.start_seconds)},${stamp(c.end_seconds)},${style},,0,0,0,,${wrapped.join('\\N')}`;
   });
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Noto Sans KR,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,108,108,384,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Noto Sans KR,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,108,108,384,1\nStyle: Emphasis,Noto Sans KR,52,&H0000FFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,1,2,108,108,384,1\nStyle: Information,Noto Sans KR,38,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,8,108,108,320,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
 }
 
 async function hasAudioStream(spawn, ffprobePath, filePath, timeoutMs, signal) {
@@ -239,7 +245,7 @@ async function runProcess(spawn, executable, args, timeoutMs, errorCode, signal,
   await new Promise((resolvePromise, reject) => {
     let child;
     try { child = spawn(executable, args, { windowsHide: true, cwd, stdio: ['ignore', 'ignore', 'pipe'] }); }
-    catch { reject(renderError(errorCode, '로컬 미디어 도구를 실행할 수 없습니다.')); return; }
+    catch (cause) { const error = renderError(cause?.code === 'ENOENT' ? 'FFMPEG_UNAVAILABLE' : errorCode, '로컬 미디어 도구를 실행할 수 없습니다.'); error.failureStage = 'ffmpeg_start'; reject(error); return; }
     let stderr = '';
     const timer = setTimeout(() => { child.kill(); reject(renderError(errorCode, '로컬 미디어 작업 시간이 초과되었습니다.')); }, timeoutMs);
     const onAbort = () => { child.kill(); reject(renderError('JOB_CANCELLED', '렌더 작업이 취소되었습니다.')); };
@@ -247,11 +253,16 @@ async function runProcess(spawn, executable, args, timeoutMs, errorCode, signal,
     signal?.addEventListener('abort', onAbort, { once: true });
     const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
     child.stderr?.on('data', (chunk) => { if (stderr.length < 4096) stderr += chunk.toString().slice(0, 4096 - stderr.length); });
-    child.once('error', () => { cleanup(); reject(renderError(errorCode, '로컬 미디어 도구를 실행할 수 없습니다.')); });
+    child.once('error', (cause) => { cleanup(); const error = renderError(cause?.code === 'ENOENT' ? 'FFMPEG_UNAVAILABLE' : errorCode, '로컬 미디어 도구를 실행할 수 없습니다.'); error.failureStage = 'ffmpeg_start'; reject(error); });
     child.once('close', (code) => {
       cleanup();
       if (code === 0) resolvePromise();
-      else reject(renderError(errorCode, '미디어 렌더 또는 검증에 실패했습니다.'));
+      else { const error = renderError(errorCode, '미디어 렌더 또는 검증에 실패했습니다.');
+        error.failureStage = 'ffmpeg_encode'; error.exitCode = Number.isInteger(code) ? code : null;
+        error.diagnosticCode = /No such file or directory/i.test(stderr) ? 'INPUT_UNAVAILABLE' :
+          /Error initializing (?:output stream|complex filters)|Error reinitializing filters/i.test(stderr) ? 'FILTER_OR_ENCODER' :
+          /Invalid data found when processing input|Could not find codec parameters/i.test(stderr) ? 'INPUT_FORMAT' : 'UNKNOWN';
+        reject(error); }
     });
   });
 }

@@ -5,6 +5,7 @@ import { canonicalManifestBytes, extensionMatches, isAllowedMediaType, isSafeDis
 import { ensureStorageDirectory, safeStoragePath } from '../../security/storage-paths.js';
 import { MusicLibrary } from '../../security/music-library.js';
 import { CAPTION_FONT_SHA256, CAPTION_TEXT_PATTERN } from '../../media-engine/caption-font.js';
+import { validSceneEffects } from '../../media-engine/scene-effects.js';
 
 export const PRIVACY_NOTICE_ID = '610ef7d0-c730-4de0-b24c-5b80e9241d11';
 export const PRIVACY_NOTICE_VERSION = '1';
@@ -31,8 +32,8 @@ export class LocalRepositories {
 
   createPrivacyConsent(ownerId, input, idempotencyKey) {
     if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
-    const validPurposes = ['llm_text', 'vision_analysis'];
-    const categoriesByPurpose = { vision_analysis: ['selected_media', 'user_text'], llm_text: ['user_text'] };
+    const validPurposes = ['llm_text', 'vision_analysis', 'diary_draft'];
+    const categoriesByPurpose = { vision_analysis: ['selected_media', 'user_text'], llm_text: ['user_text'], diary_draft: ['user_text', 'schedule', 'wellness'] };
     const expires = Date.parse(input?.expires_at);
     if (!input || Object.keys(input).some((key) => !['provider_id', 'purpose', 'data_categories', 'resource_ids', 'notice_id', 'notice_version', 'explicitly_confirmed', 'expires_at'].includes(key)) ||
         input.provider_id !== 'openai' || !validPurposes.includes(input.purpose) || !Array.isArray(input.data_categories) || !input.data_categories.length ||
@@ -40,11 +41,16 @@ export class LocalRepositories {
         JSON.stringify([...input.data_categories].sort()) !== JSON.stringify([...((categoriesByPurpose[input.purpose]) ?? [])].sort()) ||
         (input.purpose === 'vision_analysis' && (!Array.isArray(input.resource_ids) || !input.resource_ids.length || new Set(input.resource_ids).size !== input.resource_ids.length || input.resource_ids.some((id) => !isUuid(id)))) ||
         (input.purpose === 'llm_text' && input.resource_ids != null && (!Array.isArray(input.resource_ids) || input.resource_ids.length !== 0)) ||
+        (input.purpose === 'diary_draft' && (!Array.isArray(input.resource_ids) || input.resource_ids.length > 30 || new Set(input.resource_ids).size !== input.resource_ids.length || input.resource_ids.some((id) => !isUuid(id)))) ||
         input.notice_id !== PRIVACY_NOTICE_ID || input.notice_version !== PRIVACY_NOTICE_VERSION || input.explicitly_confirmed !== true ||
         !Number.isFinite(expires) || expires <= Date.now()) throw apiError(422, 'VALIDATION_ERROR', '제공자·목적·전송 범위·고지 확인을 검증할 수 없습니다.');
     for (const resourceId of input.resource_ids ?? []) {
-      const media = this.state.data.media[resourceId];
-      if (!media || media.ownerId !== ownerId || media.status !== 'available') throw apiError(404, 'RESOURCE_NOT_FOUND', '동의 대상 미디어를 찾을 수 없습니다.');
+      if (input.purpose === 'vision_analysis') {
+        const media = this.state.data.media[resourceId];
+        if (!media || media.ownerId !== ownerId || media.status !== 'available') throw apiError(404, 'RESOURCE_NOT_FOUND', '동의 대상 미디어를 찾을 수 없습니다.');
+      } else if (input.purpose === 'diary_draft' && !ownedActivePersonalSource(this.state.data, ownerId, resourceId)) {
+        throw apiError(404, 'RESOURCE_NOT_FOUND', '동의 대상 기록을 찾을 수 없습니다.');
+      }
     }
     const key = `${ownerId}:privacy-consent:${idempotencyKey}`;
     const fingerprint = JSON.stringify(input);
@@ -74,10 +80,13 @@ export class LocalRepositories {
         consent.provider_id !== providerId || consent.purpose !== purpose || !consent.explicitly_confirmed ||
         !dataCategories.every((category) => consent.data_categories.includes(category)) ||
         (purpose === 'vision_analysis' && JSON.stringify([...resourceIds].sort()) !== JSON.stringify([...(consent.resource_ids ?? [])].sort())) ||
+        (purpose === 'diary_draft' && JSON.stringify([...resourceIds].sort()) !== JSON.stringify([...(consent.resource_ids ?? [])].sort())) ||
         (purpose === 'llm_text' && (consent.resource_ids?.length ?? 0) > 0)) return false;
     for (const resourceId of resourceIds) {
-      const media = this.state.data.media[resourceId];
-      if (!media || media.ownerId !== ownerId || media.status !== 'available') return false;
+      if (purpose === 'vision_analysis') {
+        const media = this.state.data.media[resourceId];
+        if (!media || media.ownerId !== ownerId || media.status !== 'available') return false;
+      } else if (purpose === 'diary_draft' && !ownedActivePersonalSource(this.state.data, ownerId, resourceId)) return false;
     }
     return true;
   }
@@ -266,11 +275,13 @@ export class LocalRepositories {
 
   createMultiUpload(ownerId, items, idempotencyKey) {
     if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
-    for (const item of items) {
-      if (!item || !isSafeDisplayName(item.file_name) || !Number.isSafeInteger(item.size_bytes) || item.size_bytes < 1 ||
-          !/^[a-f\d]{64}$/i.test(item.sha256 ?? '') || !isUuid(item.client_item_id)) throw apiError(422, 'VALIDATION_ERROR', '선택한 미디어 선언을 확인해 주세요.');
-      if (item.size_bytes > this.maxMediaBytes) throw apiError(413, 'PAYLOAD_TOO_LARGE', '허용 크기를 초과했습니다.');
-      if (!isAllowedMediaType(item.declared_media_type) || !extensionMatches(item.file_name, item.declared_media_type)) throw apiError(415, 'UNSUPPORTED_MEDIA_TYPE', '파일 형식을 확인해 주세요.');
+    for (const [index, item] of items.entries()) {
+      if (!item || !isUuid(item.client_item_id)) throw uploadItemError(422, 'VALIDATION_ERROR', index, 'client_item_id');
+      if (!isSafeDisplayName(item.file_name)) throw uploadItemError(422, 'VALIDATION_ERROR', index, 'file_name');
+      if (!Number.isSafeInteger(item.size_bytes) || item.size_bytes < 1) throw uploadItemError(422, 'VALIDATION_ERROR', index, 'size_bytes');
+      if (!/^[a-f\d]{64}$/i.test(item.sha256 ?? '')) throw uploadItemError(422, 'VALIDATION_ERROR', index, 'sha256');
+      if (item.size_bytes > this.maxMediaBytes) throw uploadItemError(413, 'PAYLOAD_TOO_LARGE', index, 'size_bytes');
+      if (!isAllowedMediaType(item.declared_media_type) || !extensionMatches(item.file_name, item.declared_media_type)) throw uploadItemError(415, 'UNSUPPORTED_MEDIA_TYPE', index, 'declared_media_type');
     }
     const key = `${ownerId}:upload:${idempotencyKey}`;
     const fingerprint = JSON.stringify(items);
@@ -334,7 +345,8 @@ export class LocalRepositories {
     const validated = upload.items.map((item, index) => {
       const bytes = readRegularFile(safeStoragePath(this.uploadDir, `${upload.uploadId}-${index + 1}.part`));
       const result = validateMediaBytes(bytes, item.declaredType, item.expectedSize, item.expectedSha256, this.maxMediaBytes, item.fileName);
-      if (!result.ok) throw apiError(result.code === 'UNSUPPORTED_MEDIA_TYPE' ? 415 : 422, result.code, '파일 검증에 실패했습니다.');
+      if (!result.ok) throw uploadItemError(result.code === 'UNSUPPORTED_MEDIA_TYPE' ? 415 : result.code === 'PAYLOAD_TOO_LARGE' ? 413 : 422,
+        result.code, index, result.code === 'VALIDATION_ERROR' ? 'file_structure' : 'file_integrity');
       return { item, bytes, result };
     });
     const mediaIds = validated.map(() => randomUUID());
@@ -514,7 +526,7 @@ export class LocalRepositories {
     const checkpoint = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'draft' && ['pending', 'approved'].includes(item.status) && item.content_version === task.current_version && item.content_hash === task.content_hash);
     const planCheckpoint = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'plan' && item.status === 'approved' && item.content_version === task.current_version && item.content_hash === task.content_hash);
     const planApproval = planCheckpoint && this.state.data.approvals[planCheckpoint.approval_id];
-    if (!checkpoint || !['waiting_draft_approval', 'render_ready', 'rendering', 'render_simulated', 'waiting_preview_approval', 'preview_approved'].includes(task.status) ||
+    if (!checkpoint || !['waiting_draft_approval', 'render_ready', 'rendering', 'failed', 'render_simulated', 'waiting_preview_approval', 'preview_approved'].includes(task.status) ||
         !planApproval || planApproval.status !== 'active' || planApproval.approval_scope !== 'continue') {
       throw apiError(409, 'INVALID_STATE_TRANSITION', '기획 승인 후에만 현재 자막 초안을 열 수 있습니다.');
     }
@@ -602,10 +614,14 @@ export class LocalRepositories {
     if (!isValidIdempotencyKey(idempotencyKey) || !input || Object.keys(input).some((key) => !['content_version', 'content_hash', 'scenes'].includes(key)) ||
         !Number.isSafeInteger(input.content_version) || typeof input.content_hash !== 'string' || !Array.isArray(input.scenes) ||
         input.scenes.length !== project.media_ids.length || new Set(input.scenes.map((scene) => scene?.media_id)).size !== project.media_ids.length ||
-        input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['media_id', 'duration_seconds', 'trim_start_seconds'].includes(key)) ||
+        input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['media_id', 'duration_seconds', 'trim_start_seconds', 'trim_end_seconds', 'framing', 'motion', 'transition', 'subtitle_style', 'bgm_mood', 'edit_reason'].includes(key)) ||
+          !validSceneEffects(scene) ||
           !project.media_ids.includes(scene.media_id) || !Number.isFinite(scene.duration_seconds) || scene.duration_seconds < 0.1 ||
           (scene.trim_start_seconds !== undefined && (!['video/mp4', 'video/quicktime'].includes(this.state.data.media[scene.media_id]?.mediaType) ||
-            !Number.isFinite(scene.trim_start_seconds) || scene.trim_start_seconds < 0 || scene.trim_start_seconds > 3600))) ||
+            !Number.isFinite(scene.trim_start_seconds) || scene.trim_start_seconds < 0 || scene.trim_start_seconds > 3600)) ||
+          (scene.trim_end_seconds !== undefined && (!['video/mp4', 'video/quicktime'].includes(this.state.data.media[scene.media_id]?.mediaType) ||
+            !Number.isFinite(scene.trim_end_seconds) || scene.trim_end_seconds > 3600 ||
+            scene.trim_end_seconds - (scene.trim_start_seconds ?? 0) + 0.001 < scene.duration_seconds))) ||
         Math.abs(input.scenes.reduce((sum, scene) => sum + scene.duration_seconds, 0) - project.target_seconds) > 0.01) {
       throw apiError(422, 'VALIDATION_ERROR', '장면 순서와 길이를 확인해 주세요.');
     }
@@ -619,7 +635,9 @@ export class LocalRepositories {
     const scenes = input.scenes.map((item, index) => {
       const end = index === input.scenes.length - 1 ? project.target_seconds : Math.round((start + item.duration_seconds) * 100) / 100;
       const scene = { ...previous.get(item.media_id), order: index + 1, start_seconds: start, end_seconds: end };
+      for (const field of ['framing', 'motion', 'transition', 'subtitle_style', 'bgm_mood', 'edit_reason']) if (item[field] !== undefined) scene[field] = item[field];
       if (item.trim_start_seconds !== undefined) scene.trim_start_seconds = item.trim_start_seconds; else delete scene.trim_start_seconds;
+      if (item.trim_end_seconds !== undefined) scene.trim_end_seconds = item.trim_end_seconds; else delete scene.trim_end_seconds;
       start = end; return scene;
     });
     project.media_ids = input.scenes.map((scene) => scene.media_id);
@@ -946,7 +964,7 @@ export class LocalRepositories {
       this.state.save();
       return { job: this.getPublicJob(existing), created: false };
     }
-    if (task.status !== 'render_ready') throw apiError(409, 'INVALID_STATE_TRANSITION', '기획과 초안의 중간 승인이 완료되어야 렌더할 수 있습니다.');
+    if (!['render_ready', 'failed'].includes(task.status) || task.active_job_id) throw apiError(409, 'INVALID_STATE_TRANSITION', '기획과 초안의 중간 승인이 완료되어야 렌더할 수 있습니다.');
     for (const kind of ['plan', 'draft']) {
       const checkpoint = checkpoints.find((item) => item.kind === kind && item.status === 'approved');
       const approval = checkpoint && this.state.data.approvals[checkpoint.approval_id];
@@ -1035,11 +1053,14 @@ export class LocalRepositories {
     this.state.save(); return this.getPublicJob(job);
   }
 
-  failRenderJob(jobId, errorCode) {
+  failRenderJob(jobId, errorCode, diagnostics = {}) {
     const job = this.state.data.jobs[jobId];
     if (!job || !['queued', 'running'].includes(job.status)) return this.getPublicJob(job);
-    const safeCodes = new Set(['RENDER_FAILED', 'RENDER_VALIDATION_FAILED', 'FFPROBE_UNAVAILABLE', 'UNSUPPORTED_MEDIA_TYPE', 'VALIDATION_ERROR', 'RESOURCE_NOT_FOUND', 'WORKER_INTERRUPTED', 'VERSION_CONFLICT']);
+    const safeCodes = new Set(['RENDER_FAILED', 'RENDER_VALIDATION_FAILED', 'FFMPEG_UNAVAILABLE', 'FFPROBE_UNAVAILABLE', 'UNSUPPORTED_MEDIA_TYPE', 'VALIDATION_ERROR', 'RESOURCE_NOT_FOUND', 'WORKER_INTERRUPTED', 'VERSION_CONFLICT']);
     job.status = 'failed'; job.safe_error_code = safeCodes.has(errorCode) ? errorCode : 'RENDER_FAILED'; job.completed_at = new Date().toISOString();
+    if (['ffmpeg_start', 'ffmpeg_encode'].includes(diagnostics.failureStage)) job.failure_stage = diagnostics.failureStage;
+    if (Number.isInteger(diagnostics.exitCode) && diagnostics.exitCode >= 0 && diagnostics.exitCode <= 255) job.ffmpeg_exit_code = diagnostics.exitCode;
+    if (['INPUT_UNAVAILABLE', 'INPUT_FORMAT', 'FILTER_OR_ENCODER', 'UNKNOWN'].includes(diagnostics.diagnosticCode)) job.diagnostic_code = diagnostics.diagnosticCode;
     const task = this.state.data.tasks[job.task_id]; const project = task && this.state.data.projects[task.project_id];
     if (task?.active_job_id === jobId) { task.status = 'failed'; delete task.active_job_id; task.progress_percent = Math.min(task.progress_percent ?? 0, 99); }
     if (project) project.status = 'failed';
@@ -1150,6 +1171,11 @@ function publicPrivacyConsent(consent) {
   return structuredClone(publicConsent);
 }
 
+function ownedActivePersonalSource(data, ownerId, resourceId) {
+  const item = data.scheduleEvents?.[resourceId] ?? data.wellnessEntries?.[resourceId];
+  return Boolean(item && item.owner_id === ownerId && item.status === 'active');
+}
+
 function readRegularFile(path) {
   const info = lstatSync(path);
   if (!info.isFile() || info.isSymbolicLink()) throw apiError(409, 'INVALID_STATE_TRANSITION', '업로드 임시 파일을 확인할 수 없습니다.');
@@ -1170,5 +1196,12 @@ function apiError(status, code, message) {
   const error = new Error(message);
   error.status = status;
   error.code = code;
+  return error;
+}
+
+function uploadItemError(status, code, index, field) {
+  const error = apiError(status, code, '선택한 미디어 항목을 확인해 주세요.');
+  error.itemIndex = index + 1;
+  error.field = field;
   return error;
 }

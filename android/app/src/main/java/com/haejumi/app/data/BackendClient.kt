@@ -55,8 +55,33 @@ class BackendClient(internal val settings: SecureSettings, private val resolver:
         require(Regex("^[0-9a-fA-F-]{36}$").matches(taskId))
         request("GET", "/tasks/$taskId").getString("status")
     }
-    suspend fun message(text: String) = withContext(Dispatchers.IO) {
-        request("POST", "/assistant/messages", JSONObject().put("text", text).toString(), UUID.randomUUID().toString()).getString("reply")
+    suspend fun messageResult(text: String, consentId: String? = null, taskId: String? = null) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("text", text)
+        if (consentId != null) { require(Regex("^[0-9a-fA-F-]{36}$").matches(consentId)); body.put("privacy_consent_id", consentId) }
+        if (taskId != null) { require(Regex("^[0-9a-fA-F-]{36}$").matches(taskId)); body.put("task_id", taskId) }
+        request("POST", "/assistant/messages", body.toString(), UUID.randomUUID().toString())
+    }
+    suspend fun message(text: String) = messageResult(text).getString("reply")
+    suspend fun assistantHistory() = withContext(Dispatchers.IO) { request("GET", "/assistant/history").getJSONArray("items") }
+    suspend fun clearAssistantHistory() = withContext(Dispatchers.IO) { request("DELETE", "/assistant/history", key = UUID.randomUUID().toString()) }
+    suspend fun llmUsage() = withContext(Dispatchers.IO) { request("GET", "/llm/usage") }
+    suspend fun textNotice() = withContext(Dispatchers.IO) { request("GET", "/privacy/processing-notice?provider_id=openai&purpose=llm_text") }
+    suspend fun consents() = withContext(Dispatchers.IO) { request("GET", "/privacy/consents") }
+    suspend fun grantTextConsent(notice: JSONObject) = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("provider_id", "openai").put("purpose", "llm_text")
+            .put("data_categories", JSONArray().put("user_text")).put("resource_ids", JSONArray())
+            .put("notice_id", notice.getString("notice_id")).put("notice_version", notice.getString("notice_version"))
+            .put("explicitly_confirmed", true)
+            .put("expires_at", java.time.Instant.now().plusSeconds(24 * 3600).toString())
+        request("POST", "/privacy/consents", body.toString(), UUID.randomUUID().toString())
+    }
+    suspend fun revokeConsent(id: String) = withContext(Dispatchers.IO) {
+        require(Regex("^[0-9a-fA-F-]{36}$").matches(id))
+        request("DELETE", "/privacy/consents/$id", key = UUID.randomUUID().toString())
+    }
+    suspend fun confirmProposal(id: String) = withContext(Dispatchers.IO) {
+        require(Regex("^[0-9a-fA-F-]{36}$").matches(id))
+        request("POST", "/assistant/proposals/$id/confirm", key = UUID.randomUUID().toString())
     }
     suspend fun createProject(mediaId: String, key: String) = withContext(Dispatchers.IO) {
         request("POST", "/content/projects", JSONObject().put("media_ids", JSONArray().put(mediaId)).toString(), key).getString("task_id")

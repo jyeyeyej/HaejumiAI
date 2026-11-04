@@ -11,10 +11,10 @@ info:
     status: proposed-pending-contract-approval
     notes:
       - Project creation creates an initial Creator task and a pending plan checkpoint; plan and draft continue approvals are required before render.
-      - The reference adapter accepts one selected media item and one body part per upload session; each selected media item needs its own session.
+      - The reference adapter supports ordered multi-item upload sessions; each selected media item currently uses one numbered body part.
       - Render jobs use only media already attached to the owned project; requests cannot provide paths or arbitrary media IDs.
       - Test renderer results use status simulated and a non-video preview media type; they are never verified MP4 output.
-      - Multi-item chunk addressing, full codec decoding and final task linkage remain approval or verification items.
+      - Actual Android device use, private HTTPS routing, and external provider dispatch remain unverified.
 servers:
   - url: /api/v1
     description: Shared base path; PC browser uses a 127.0.0.1 proxy, while Android's private HTTPS route remains unverified.
@@ -31,8 +31,11 @@ tags:
   - name: Rights
   - name: Publishing
   - name: Diary
+  - name: Backups
+  - name: Trends
 security:
   - bearerAuth: []
+  - webSession: []
 x-security-policy:
   status: proposal-pending-user-approval
   authentication: Every operation requires the authenticated session except POST /auth/session.
@@ -101,6 +104,62 @@ x-capability-registry:
   current-mvp-agents: [creator, schedule, wellness, diary]
   future-examples: [blog, music]
 paths:
+  /auth/web-session:
+    post:
+      tags: [Auth]
+      operationId: createLocalWebSession
+      summary: Exchange a valid local Bearer token for a persistent PC web session
+      security: [{ bearerAuth: [] }]
+      description: Requires same-origin 127.0.0.1 Origin and X-Haejumi-Web header. Sets a 30-day HttpOnly SameSite=Strict cookie containing only a random session ID. Local HTTP omits Secure; a verified private HTTPS endpoint must enable Secure.
+      parameters:
+        - { name: X-Haejumi-Web, in: header, required: true, schema: { type: string, enum: ['1'] } }
+      responses:
+        '201': { description: Session cookie issued }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      tags: [Auth]
+      operationId: getLocalWebSession
+      summary: Check the current web login without exposing the session ID
+      responses:
+        '200': { description: Valid login session }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Auth]
+      operationId: revokeLocalWebSession
+      summary: Revoke the current web login and clear its cookie
+      security: [{ webSession: [] }]
+      parameters:
+        - { name: X-Haejumi-Web, in: header, required: true, schema: { type: string, enum: ['1'] } }
+      responses:
+        '204': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /llm/usage:
+    get:
+      tags: [Privacy]
+      operationId: getLlmUsage
+      summary: Read local LLM enablement and reserved budget without revealing credentials
+      responses:
+        '200':
+          description: Local LLM usage and configured limits
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [enabled, provider_ready, day, month, daily_reserved_usd, monthly_reserved_usd, daily_limit_usd, monthly_limit_usd, max_calls_per_task]
+                properties:
+                  enabled: { type: boolean }
+                  provider_ready: { type: boolean }
+                  day: { type: [string, 'null'] }
+                  month: { type: [string, 'null'] }
+                  daily_reserved_usd: { type: number, minimum: 0 }
+                  monthly_reserved_usd: { type: number, minimum: 0 }
+                  daily_limit_usd: { type: number, minimum: 0 }
+                  monthly_limit_usd: { type: number, minimum: 0 }
+                  max_calls_per_task: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /auth/session:
     post:
       tags: [Auth]
@@ -142,6 +201,55 @@ paths:
         '204': { description: Session revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
         default: { $ref: '#/components/responses/Error' }
+  /backups:
+    post:
+      tags: [Backups]
+      operationId: createLocalBackup
+      summary: Create an owner-bound local snapshot with file hashes
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Snapshot created without modifying live data
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backup_id, created_at, file_count, status]
+                properties:
+                  backup_id: { type: string, format: uuid }
+                  created_at: { type: string, format: date-time }
+                  file_count: { type: integer, minimum: 1 }
+                  status: { type: string, const: verified_snapshot }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        default: { $ref: '#/components/responses/Error' }
+  /backups/{backup_id}/restore-copy:
+    post:
+      tags: [Backups]
+      operationId: restoreLocalBackupCopy
+      summary: Verify a snapshot and materialize a separate recovered copy
+      description: Does not replace or activate live state. Requires an authenticated owner and a matching backup owner.
+      parameters:
+        - { name: backup_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Verified copy created; live data untouched
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [restore_id, backup_id, file_count, status, notice]
+                properties:
+                  restore_id: { type: string, format: uuid }
+                  backup_id: { type: string, format: uuid }
+                  file_count: { type: integer, minimum: 1 }
+                  status: { type: string, const: recovered_copy }
+                  notice: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Error' }
   /privacy/processing-notice:
     get:
       tags: [Privacy]
@@ -149,7 +257,7 @@ paths:
       summary: Read the provider, purpose, and data disclosure before consent
       parameters:
         - { name: provider_id, in: query, required: true, schema: { type: string, enum: [openai] } }
-        - { name: purpose, in: query, required: true, schema: { type: string, enum: [vision_analysis, llm_text] } }
+        - { name: purpose, in: query, required: true, schema: { type: string, enum: [vision_analysis, llm_text, diary_draft] } }
       responses:
         '200':
           description: Server-owned disclosure shown before scoped consent
@@ -160,12 +268,16 @@ paths:
                 required: [provider_id, purpose, data_categories, notice_id, notice_version, disclosure, provider_retention]
                 properties:
                   provider_id: { type: string, const: openai }
-                  purpose: { type: string, enum: [vision_analysis, llm_text] }
-                  data_categories: { type: array, items: { type: string, enum: [selected_media, user_text] } }
+                  purpose: { type: string, enum: [vision_analysis, llm_text, diary_draft] }
+                  data_categories: { type: array, items: { type: string, enum: [selected_media, user_text, schedule, wellness] } }
                   notice_id: { type: string, format: uuid }
                   notice_version: { type: string }
                   disclosure: { type: string }
                   provider_retention: { type: string }
+                  vision_max_images: { type: integer, minimum: 1, maximum: 20, description: Vision only; maximum selected visual samples prepared and sent. }
+                  vision_max_side: { type: integer, description: Vision only; maximum resized image side in pixels. }
+                  vision_max_bytes_per_image: { type: integer, description: Vision only; maximum locally prepared JPEG bytes. }
+                  estimated_cost_usd_max: { type: number, minimum: 0, description: 'Vision only: conservative reservation estimate for maximum samples, not a provider billing guarantee.' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
@@ -230,6 +342,25 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
+  /trends/search:
+    get:
+      tags: [Trends]
+      operationId: searchCreatorTrendMetadata
+      summary: Search recent short-video metadata from the official YouTube Data API
+      description: Authenticated request; server-side key only. Disabled by default. No reference video/audio download or editing-effect inspection. At most 10 live searches per UTC day.
+      parameters:
+        - { name: topic, in: query, required: true, schema: { type: string, enum: [restaurant, cafe, travel] } }
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 90, default: 30 } }
+      responses:
+        '200':
+          description: Metadata-only results or a clearly labeled local fallback
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrendSearchResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
   /capabilities:
     get:
       tags: [Capabilities]
@@ -255,10 +386,13 @@ paths:
       operationId: submitAssistantMessage
       summary: Submit a text request or user-confirmed transcript to Yetu
       description: >-
+        Casual conversation and feelings are not automatically recorded as Wellness or Diary data.
         Rule-based routing uses only the authenticated request and registered capabilities.
-        Multiple or unknown intents return clarification. A Creator task_id permits
+        Multiple record commands are split into separate confirmation requests. A Creator task_id permits
         planning only from media already attached to that owned task. This endpoint does
-        not grant external-processing consent. OpenAI visual analysis requires a prior
+        not grant external-processing consent. Free talk is limited when the external LLM is off.
+        OpenAI text interpretation requires a separate consent and sends only the current text.
+        OpenAI visual analysis requires a prior
         server notice display and a matching consent_id; the LLM Gateway and PrivacyGate
         revalidate it immediately before dispatch.
       parameters:
@@ -279,6 +413,24 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
+  /assistant/history:
+    get:
+      tags: [Assistant]
+      operationId: listAssistantHistory
+      summary: List the authenticated owner's locally stored recent Yetu conversation
+      description: Up to 100 messages from the last 30 days are retained locally. Historical text is not automatically sent to an external LLM.
+      responses:
+        '200': { description: Owner-scoped recent messages and replies }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Assistant]
+      operationId: clearAssistantHistory
+      summary: Clear the authenticated owner's live Yetu conversation history
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Live conversation history cleared }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /voice/transcriptions:
     post:
       tags: [Assistant]
@@ -386,12 +538,12 @@ paths:
     get:
       tags: [Tasks]
       operationId: getCreatorCaptionDraft
-      summary: Read captions only after the plan checkpoint has been approved
+      summary: Read captions after plan approval, including after a render failure
       parameters:
         - $ref: '#/components/parameters/TaskId'
       responses:
         '200':
-          description: Caption draft and its pending continue checkpoint
+          description: Current version caption draft and its pending or approved continue checkpoint; a failed render does not revoke it
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CreatorDraft' }
@@ -1127,7 +1279,181 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
+  /assistant/proposals/{proposal_id}/confirm:
+    post:
+      tags: [Supervisor]
+      operationId: confirmLocalAssistantProposal
+      summary: Confirm one owner-scoped local write proposal
+      description: A proposal expires after one hour. The endpoint never approves diary final saving or SNS publishing.
+      parameters:
+        - { name: proposal_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Confirmed local action result }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /schedule/occurrences:
+    get:
+      tags: [Schedule]
+      operationId: listScheduleOccurrences
+      summary: Expand stored recurrence rules for a bounded date range
+      description: Date range is limited to 366 days. This endpoint does not schedule or deliver notifications. Recurrences retain the original numeric UTC offset; daylight-saving time zone transitions are not yet modeled.
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Owner-scoped occurrence list }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /schedule/events:
+    get:
+      tags: [Schedule]
+      operationId: listScheduleEvents
+      summary: List authenticated owner's local schedule events
+      parameters:
+        - { name: date, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Owner-scoped items }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Schedule]
+      operationId: createScheduleEvent
+      summary: Create a local event with optional stored recurrence and reminder preference
+      description: Reminder delivery is not implemented and cannot be guaranteed while the PC is off.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleEventInput' }
+      responses:
+        '201': { description: Created event }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /schedule/events/{event_id}:
+    parameters:
+      - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Schedule]
+      operationId: getScheduleEvent
+      summary: Get one owned schedule event
+      responses:
+        '200': { description: Owned event }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Schedule]
+      operationId: editScheduleEvent
+      summary: Revise one owned schedule event
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }
+      responses:
+        '200': { description: New event version }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Schedule]
+      operationId: deleteScheduleEvent
+      summary: Soft delete one owned schedule event
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }
+      responses:
+        '200': { description: Soft deleted }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /wellness/entries:
+    get:
+      tags: [Wellness]
+      operationId: listWellnessEntries
+      summary: List owned wellness records
+      parameters:
+        - { name: date, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Owner-scoped local entries }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Wellness]
+      operationId: createWellnessEntry
+      summary: Create a local wellness record
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WellnessEntryInput' }
+      responses:
+        '201': { description: Created entry; not a medical diagnosis }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /wellness/entries/{entry_id}:
+    parameters:
+      - { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Wellness]
+      operationId: getWellnessEntry
+      summary: Get one owned wellness record
+      responses:
+        '200': { description: Owned entry }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Wellness]
+      operationId: editWellnessEntry
+      summary: Revise one owned wellness record
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }
+      responses:
+        '200': { description: New entry version }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Wellness]
+      operationId: deleteWellnessEntry
+      summary: Soft delete one owned wellness record
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }
+      responses:
+        '200': { description: Soft deleted }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /wellness/summary:
+    get:
+      tags: [Wellness]
+      operationId: summarizeWellness
+      summary: Calculate a descriptive wellness summary
+      description: Local descriptive summary only; no diagnosis or treatment advice.
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Owner-scoped counts and averages }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /diaries/drafts:
+    get:
+      tags: [Diary]
+      operationId: listDiaryDrafts
+      summary: List owned diary drafts
+      parameters:
+        - { name: date, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Owner-scoped drafts }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       tags: [Diary]
       operationId: createDiaryDraft
@@ -1150,6 +1476,15 @@ paths:
         '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
   /diaries/drafts/{draft_id}:
+    get:
+      tags: [Diary]
+      operationId: getDiaryDraft
+      summary: Get one owned diary draft
+      parameters:
+        - $ref: '#/components/parameters/DraftId'
+      responses:
+        '200': { description: Owned draft }
+        '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [Diary]
       operationId: reviseDiaryDraft
@@ -1213,8 +1548,88 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         default: { $ref: '#/components/responses/Error' }
+  /diaries/drafts/{draft_id}/approvals:
+    post:
+      tags: [Diary]
+      operationId: approveDiaryDraft
+      summary: Approve an exact draft version for continuation or final saving
+      parameters:
+        - $ref: '#/components/parameters/DraftId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content_version, content_hash, approval_scope]
+              properties:
+                content_version: { type: integer, minimum: 1 }
+                content_hash: { $ref: '#/components/schemas/Sha256' }
+                approval_scope: { type: string, enum: [continue, final_diary] }
+      responses:
+        '201': { description: Version-bound approval }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /diaries/entries:
+    get:
+      tags: [Diary]
+      operationId: listDiaryEntries
+      summary: List finalized owner-scoped diary entries
+      parameters:
+        - { name: date, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Finalized owner-scoped entries }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /diaries/entries/{entry_id}:
+    parameters:
+      - { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Diary]
+      operationId: getDiaryEntry
+      summary: Get one finalized owned diary entry
+      responses:
+        '200': { description: Owned finalized entry }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Diary]
+      operationId: deleteDiaryEntry
+      summary: Soft delete one finalized owned diary entry
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }
+      responses:
+        '200': { description: Soft deleted }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /diaries/entries/{entry_id}/revisions:
+    post:
+      tags: [Diary]
+      operationId: beginDiaryEntryRevision
+      summary: Create a new draft for editing an approved diary entry
+      description: The saved entry remains unchanged until the revision draft receives both current-version approvals and is finalized.
+      parameters:
+        - { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [version], properties: { version: { type: integer, minimum: 1 } } }
+      responses:
+        '201': { description: Revision draft created }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 components:
   securitySchemes:
+    webSession:
+      type: apiKey
+      in: cookie
+      name: haejumi_web
+      description: 'PC web only; mutating cookie requests require same-origin Origin and X-Haejumi-Web: 1.'
     bearerAuth:
       type: http
       scheme: bearer
@@ -1282,6 +1697,8 @@ components:
           properties:
             code: { $ref: '#/components/schemas/ErrorCode' }
             message: { type: string }
+            item_index: { type: integer, minimum: 1, maximum: 30, description: One-based position of the selected upload item when validation can identify it. }
+            field: { type: string, enum: [client_item_id, file_name, size_bytes, sha256, declared_media_type, file_structure, file_integrity, file_bytes] }
             details:
               type: array
               items:
@@ -1293,7 +1710,7 @@ components:
         request_id: { type: string, format: uuid }
     ErrorCode:
       type: string
-      enum: [VALIDATION_ERROR, AUTHENTICATION_REQUIRED, FORBIDDEN, RESOURCE_NOT_FOUND, CAPABILITY_NOT_FOUND, CAPABILITY_DISABLED, CONSENT_REQUIRED, PRIVACY_POLICY_DENIED, RIGHTS_BLOCKED, RIGHTS_REVIEW_REQUIRED, VERSION_CONFLICT, STALE_APPROVAL, APPROVAL_SCOPE_MISMATCH, INVALID_STATE_TRANSITION, IDEMPOTENCY_CONFLICT, PUBLICATION_ALREADY_EXISTS, PUBLISH_ALREADY_EXISTS, PLATFORM_NOT_SUPPORTED, OAUTH_EXPIRED, RENDER_REQUIRED, RENDER_FAILED, LLM_BUDGET_EXCEEDED, TRANSCRIPT_CONFIRMATION_REQUIRED, RATE_LIMITED, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, SERVICE_UNAVAILABLE]
+      enum: [VALIDATION_ERROR, AUTHENTICATION_REQUIRED, FORBIDDEN, RESOURCE_NOT_FOUND, CAPABILITY_NOT_FOUND, CAPABILITY_DISABLED, CONSENT_REQUIRED, PRIVACY_POLICY_DENIED, RIGHTS_BLOCKED, RIGHTS_REVIEW_REQUIRED, VERSION_CONFLICT, STALE_APPROVAL, APPROVAL_SCOPE_MISMATCH, INVALID_STATE_TRANSITION, IDEMPOTENCY_CONFLICT, PUBLICATION_ALREADY_EXISTS, PUBLISH_ALREADY_EXISTS, PLATFORM_NOT_SUPPORTED, OAUTH_EXPIRED, RENDER_REQUIRED, RENDER_FAILED, FFMPEG_UNAVAILABLE, LLM_BUDGET_EXCEEDED, TRANSCRIPT_CONFIRMATION_REQUIRED, RATE_LIMITED, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, SERVICE_UNAVAILABLE]
     SessionResponse:
       type: object
       additionalProperties: false
@@ -1304,7 +1721,7 @@ components:
         expires_at: { type: string, format: date-time }
     PrivacyPurpose:
       type: string
-      enum: [llm_text, vision_analysis]
+      enum: [llm_text, vision_analysis, diary_draft]
     PrivacyConsentGrant:
       type: object
       additionalProperties: false
@@ -1323,6 +1740,18 @@ components:
                   - contains: { const: user_text }
         - if: { properties: { purpose: { const: llm_text } }, required: [purpose] }
           then: { properties: { data_categories: { const: [user_text] } } }
+        - if: { properties: { purpose: { const: diary_draft } }, required: [purpose] }
+          then:
+            required: [resource_ids]
+            properties:
+              resource_ids: { maxItems: 30 }
+              data_categories:
+                minItems: 3
+                maxItems: 3
+                allOf:
+                  - contains: { const: user_text }
+                  - contains: { const: schedule }
+                  - contains: { const: wellness }
       properties:
         provider_id: { type: string, const: openai }
         purpose: { $ref: '#/components/schemas/PrivacyPurpose' }
@@ -1335,7 +1764,7 @@ components:
           type: array
           uniqueItems: true
           items: { type: string, format: uuid }
-          description: For vision_analysis, the exact selected media IDs must be non-empty and owner-authorized.
+          description: For vision_analysis use exact selected media IDs; for diary_draft use exact selected Schedule and Wellness record IDs.
         notice_version: { type: string }
         notice_id: { type: string, format: uuid }
         explicitly_confirmed: { type: boolean, const: true }
@@ -1383,7 +1812,7 @@ components:
         confirmed_transcript: { type: boolean, default: false }
         attachment_ids: { type: array, items: { type: string, format: uuid } }
         task_id: { type: string, format: uuid, description: Existing owned Creator task; required to create a storyboard from its selected project media. }
-        privacy_consent_id: { type: string, format: uuid, description: Optional active OpenAI vision consent; does not enable external calls by itself. }
+        privacy_consent_id: { type: string, format: uuid, description: Optional active OpenAI llm_text or vision_analysis consent depending on request; does not enable external calls by itself. }
     AssistantMessageResponse:
       type: object
       additionalProperties: false
@@ -1391,7 +1820,14 @@ components:
       properties:
         reply: { type: string }
         route: { type: string }
-        status: { type: string, enum: [routed, needs_project, needs_clarification, not_implemented, disabled, unsupported] }
+        status: { type: string, enum: [conversation, routed, needs_project, needs_clarification, needs_confirmation, completed_read, not_implemented, disabled, unsupported] }
+        actions: { type: array, description: Read results or local write proposals requiring separate confirmation, items: { type: object, additionalProperties: true } }
+        interpretation:
+          type: object
+          additionalProperties: false
+          properties:
+            source: { type: string, enum: [local_rules, mock, gateway] }
+            gate_reason: { type: [string, 'null'] }
         agent_id: { type: [string, 'null'] }
         capability_id: { type: [string, 'null'] }
         task_id: { type: [string, 'null'], format: uuid }
@@ -1427,6 +1863,13 @@ components:
               media_id: { type: string, format: uuid }
               duration_seconds: { type: number, minimum: 0.1, maximum: 59 }
               trim_start_seconds: { type: number, minimum: 0, maximum: 3600, description: Video only; seek from this source position before rendering. }
+              trim_end_seconds: { type: number, minimum: 0, maximum: 3600, description: Optional video source end position. Must leave at least duration_seconds after trim_start_seconds. }
+              framing: { type: string, enum: [inherit, fit_pad, fill_crop, blur_pad] }
+              motion: { type: string, enum: [static, zoom_in, zoom_out, pan_left, pan_right] }
+              transition: { type: string, enum: [cut, fade] }
+              subtitle_style: { type: string, enum: [default, emphasis, information] }
+              bgm_mood: { type: string, maxLength: 100 }
+              edit_reason: { type: string, maxLength: 500 }
     CreatorPlanResult:
       type: object
       additionalProperties: false
@@ -1444,6 +1887,38 @@ components:
       required: [title_idea, format, aspect_ratio, target_seconds, scenes]
       properties:
         title_idea: { type: string, maxLength: 64 }
+        theme: { type: string, maxLength: 500, description: Optional for older locally stored plans. }
+        opening_hook: { type: string, maxLength: 500 }
+        story_flow: { type: string, maxLength: 500 }
+        mood: { type: string, maxLength: 500 }
+        ending_line: { type: string, maxLength: 500 }
+        recommended_media_order: { type: array, description: Suggested order only; actual order changes require a versioned scene edit and new approval., items: { type: string, format: uuid } }
+        publication_suggestions:
+          type: array
+          description: Draft text only; account and visibility are never selected and no publication occurs.
+          items:
+            type: object
+            required: [platform, title, description, hashtags]
+            properties:
+              platform: { type: string, enum: [youtube, tiktok, instagram] }
+              title: { type: string, maxLength: 200 }
+              description: { type: string, maxLength: 5000 }
+              hashtags: { type: array, maxItems: 30, items: { type: string, maxLength: 100 } }
+        media_insights:
+          type: array
+          description: One insight per selected media in project order. Visual claims for unsampled media must remain uncertain.
+          items:
+            type: object
+            required: [media_id, description, mood, subjects, usable_detail, uncertainty]
+            properties:
+              media_id: { type: string, format: uuid }
+              description: { type: string, maxLength: 500 }
+              mood: { type: string, maxLength: 500 }
+              subjects: { type: array, maxItems: 12, items: { type: string, maxLength: 80 } }
+              usable_detail: { type: string, maxLength: 500 }
+              uncertainty: { type: string, maxLength: 500 }
+              category: { type: string, enum: [food, cafe, travel, other, unknown] }
+              orientation: { type: string, enum: [landscape, portrait, square, unknown] }
         format: { type: string, const: vertical_short }
         aspect_ratio: { type: string, const: '9:16' }
         target_seconds: { type: integer, minimum: 3, maximum: 59 }
@@ -1460,8 +1935,46 @@ components:
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
               trim_start_seconds: { type: number, minimum: 0, maximum: 3600 }
+              trim_end_seconds: { type: number, minimum: 0, maximum: 3600 }
               visual_direction: { type: string, maxLength: 500 }
-              caption_text: { type: string, maxLength: 500 }
+              caption_text: { type: string, maxLength: 80 }
+              framing: { type: string, enum: [inherit, fit_pad, fill_crop, blur_pad] }
+              motion: { type: string, enum: [static, zoom_in, zoom_out, pan_left, pan_right] }
+              transition: { type: string, enum: [cut, fade] }
+              subtitle_style: { type: string, enum: [default, emphasis, information] }
+              bgm_mood: { type: string, maxLength: 100 }
+              edit_reason: { type: string, maxLength: 500 }
+    TrendSearchResult:
+      type: object
+      required: [status, source, topic, period, analysis_scope, items]
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
+        reason: { type: string, enum: [API_NOT_ENABLED, API_LIMITED, API_UNAVAILABLE] }
+        source: { type: string, enum: [youtube_data_api, local_fallback] }
+        topic: { type: string, enum: [restaurant, cafe, travel] }
+        period:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        analysis_scope: { type: string, enum: [metadata_only, none] }
+        suggestion: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            required: [video_id, url, title, published_at, view_count, like_count, comment_count, duration_seconds, analysis_scope]
+            properties:
+              video_id: { type: string }
+              url: { type: string, format: uri }
+              title: { type: string }
+              published_at: { type: [string, 'null'], format: date-time }
+              view_count: { type: [integer, 'null'] }
+              like_count: { type: [integer, 'null'] }
+              comment_count: { type: [integer, 'null'] }
+              duration_seconds: { type: integer }
+              analysis_scope: { type: string, const: metadata_only }
     CreatorDraft:
       type: object
       additionalProperties: false
@@ -1480,7 +1993,7 @@ components:
               order: { type: integer, minimum: 1 }
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
-              text: { type: string, maxLength: 500 }
+              text: { type: string, maxLength: 80 }
         composition:
           anyOf:
             - { $ref: '#/components/schemas/CreatorComposition' }
@@ -1823,6 +2336,9 @@ components:
         status: { type: string, enum: [queued, running, succeeded, simulated, failed, cancelled, blocked, outcome_unknown, reconciling, needs_user_action] }
         progress_percent: { type: integer, minimum: 0, maximum: 100 }
         safe_error_code: { type: string }
+        failure_stage: { type: string, enum: [ffmpeg_start, ffmpeg_encode] }
+        ffmpeg_exit_code: { type: integer, minimum: 0, maximum: 255 }
+        diagnostic_code: { type: string, enum: [INPUT_UNAVAILABLE, INPUT_FORMAT, FILTER_OR_ENCODER, UNKNOWN] }
         content_version: { type: integer, minimum: 1 }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         artifact_sha256: { $ref: '#/components/schemas/Sha256' }
@@ -1955,6 +2471,35 @@ components:
         reconciliation_status: { type: string, enum: [not_needed, pending, querying_platform, matched_success, matched_failure, inconclusive, user_action_required] }
         platform_operation_id: { type: string }
         next_retry_at: { type: string, format: date-time, description: 'Only for safe reconciliation queries; never signals blind re-upload.' }
+    ScheduleEventInput:
+      type: object
+      additionalProperties: false
+      required: [title, start_at, end_at]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        notes: { type: string, maxLength: 4000 }
+        reminder_minutes: { type: [integer, 'null'], minimum: 0, maximum: 10080 }
+        recurrence:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [frequency, interval, until]
+          properties:
+            frequency: { type: string, enum: [daily, weekly, monthly] }
+            interval: { type: integer, minimum: 1, maximum: 365 }
+            until: { type: string, format: date }
+    WellnessEntryInput:
+      type: object
+      additionalProperties: false
+      required: [date, mood]
+      properties:
+        date: { type: string, format: date }
+        mood: { type: string, enum: [very_low, low, neutral, good, very_good] }
+        sleep_hours: { type: [number, 'null'], minimum: 0, maximum: 24 }
+        activity_minutes: { type: [integer, 'null'], minimum: 0, maximum: 1440 }
+        habits: { type: array, maxItems: 20, items: { type: string, maxLength: 80 } }
+        note: { type: string, maxLength: 4000 }
     DiaryDraftRequest:
       type: object
       additionalProperties: false
@@ -1963,6 +2508,8 @@ components:
         date: { type: string, format: date }
         allowed_source_ids: { type: array, items: { type: string, format: uuid } }
         tone: { type: string, maxLength: 80 }
+        user_notes: { type: string, maxLength: 4000 }
+        privacy_consent_id: { type: string, format: uuid, description: 'Optional diary_draft consent; live calls also require both server switches, PrivacyGate, and budget.' }
     DiaryDraft:
       type: object
       additionalProperties: false
@@ -1973,6 +2520,13 @@ components:
         status: { type: string, enum: [draft, review_required, finalized] }
         content_hash: { $ref: '#/components/schemas/Sha256' }
         body: { type: string }
+        generation:
+          type: object
+          description: Present when external draft generation was requested; the result may be a local fallback.
+          properties:
+            source: { type: string, enum: [mock, gateway, local_rules] }
+            fallback_used: { type: boolean }
+            gate_reason: { type: [string, 'null'] }
     DiaryEntry:
       type: object
       additionalProperties: false

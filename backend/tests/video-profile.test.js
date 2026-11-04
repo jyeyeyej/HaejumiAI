@@ -34,6 +34,12 @@ test('render command emits vertical 1080p 30fps H.264 MP4 with AAC audio', () =>
   assert.equal(args.at(-1), 'result.mp4');
 });
 
+test('video source end position bounds the selected input interval', () => {
+  const args = buildRenderArgs([{ kind: 'video', path: 'clip.mp4' }], 'result.mp4', {
+    targetSeconds: 3, timeline: [{ duration: 3, trimStart: 2, trimEnd: 5 }] });
+  assert.deepEqual(args.slice(args.indexOf('-ss'), args.indexOf('-i') + 2), ['-ss', '2', '-t', '3', '-i', 'clip.mp4']);
+});
+
 test('ffprobe accepts only a file that meets every required render invariant', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'haejumi-render-test-'));
   const filePath = join(dir, 'result.mp4');

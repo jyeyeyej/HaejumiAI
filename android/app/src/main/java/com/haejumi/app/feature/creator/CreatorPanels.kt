@@ -30,15 +30,24 @@ fun PlanPanel(task: JSONObject, plan: JSONObject?, checkpoints: JSONArray, busy:
             val board = plan.getJSONObject("plan")
             Text("제목 제안: ${board.optString("title_idea")}")
             Text("화면 ${board.optString("aspect_ratio")} · ${board.optInt("target_seconds")}초 · 버전 ${plan.optInt("content_version")}")
+            Text("생성 출처: ${plan.optJSONObject("generation")?.optString("source") ?: "local_rules"}")
+            if (board.has("theme")) Text("주제 ${board.optString("theme")} · 분위기 ${board.optString("mood")} · 오프닝 ${board.optString("opening_hook")}")
+            board.optJSONArray("media_insights")?.objects()?.forEachIndexed { index, insight ->
+                Text("미디어 ${index + 1}: ${insight.optString("description")} · ${insight.optString("category", "unknown")} · ${insight.optString("orientation", "unknown")}")
+            }
             board.optJSONArray("scenes")?.objects()?.forEach { scene ->
                 Text("장면 ${scene.optInt("order")}: ${scene.optDouble("start_seconds")}~${scene.optDouble("end_seconds")}초")
                 Text(scene.optString("visual_direction"))
                 Text("제안 자막: ${scene.optString("caption_text")}")
+                Text("효과 ${scene.optString("framing", "inherit")} · ${scene.optString("motion", "static")} · ${scene.optString("transition", "cut")}")
             }
             val initialScenes = remember(plan.optInt("content_version")) { board.getJSONArray("scenes").objects().map { scene ->
                 SceneEditRow(scene.getString("media_id"), scene.getString("media_type"),
                     "%.2f".format(java.util.Locale.US, scene.getDouble("end_seconds") - scene.getDouble("start_seconds")),
-                    scene.optDouble("trim_start_seconds", 0.0).toString()) } }
+                    scene.optDouble("trim_start_seconds", 0.0).toString(),
+                    if (scene.has("trim_end_seconds")) scene.optDouble("trim_end_seconds").toString() else "",
+                    scene.optString("framing", "inherit"), scene.optString("motion", "static"),
+                    scene.optString("transition", "cut"), scene.optString("subtitle_style", "default")) } }
             var sceneRows by remember(plan.optInt("content_version")) { mutableStateOf(initialScenes) }
             val durationSum = sceneRows.sumOf { it.duration.toDoubleOrNull() ?: 0.0 }
             Text("장면 순서·길이 수정 · 합계 ${"%.2f".format(java.util.Locale.US, durationSum)}/${board.optInt("target_seconds")}초")
@@ -46,15 +55,25 @@ fun PlanPanel(task: JSONObject, plan: JSONObject?, checkpoints: JSONArray, busy:
                 Text("${index + 1}. ${if (row.mediaType.startsWith("video/")) "영상" else "사진"} · ${row.mediaId.take(8)}")
                 OutlinedTextField(row.duration, { text -> sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(duration = text) } }, label = { Text("재생 초") })
                 if (row.mediaType.startsWith("video/")) OutlinedTextField(row.trimStart, { text -> sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(trimStart = text) } }, label = { Text("영상 시작 위치(초)") })
+                if (row.mediaType.startsWith("video/")) OutlinedTextField(row.trimEnd, { text -> sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(trimEnd = text) } }, label = { Text("영상 종료 위치(초, 선택)") })
+                TextButton(onClick = { sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(framing = nextEffect(row.framing, listOf("inherit", "fit_pad", "fill_crop", "blur_pad"))) } }, enabled = !busy) { Text("화면: ${row.framing}") }
+                TextButton(onClick = { sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(motion = nextEffect(row.motion, listOf("static", "zoom_in", "zoom_out", "pan_left", "pan_right"))) } }, enabled = !busy) { Text("움직임: ${row.motion}") }
+                TextButton(onClick = { sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(transition = nextEffect(row.transition, listOf("cut", "fade"))) } }, enabled = !busy) { Text("전환: ${row.transition}") }
+                TextButton(onClick = { sceneRows = sceneRows.toMutableList().also { it[index] = row.copy(subtitleStyle = nextEffect(row.subtitleStyle, listOf("default", "emphasis", "information"))) } }, enabled = !busy) { Text("자막 스타일: ${row.subtitleStyle}") }
                 Row {
                     TextButton(onClick = { sceneRows = sceneRows.toMutableList().also { val prior = it[index - 1]; it[index - 1] = it[index]; it[index] = prior } }, enabled = !busy && index > 0) { Text("위로") }
                     TextButton(onClick = { sceneRows = sceneRows.toMutableList().also { val next = it[index + 1]; it[index + 1] = it[index]; it[index] = next } }, enabled = !busy && index < sceneRows.lastIndex) { Text("아래로") }
                 }
             }
             val validScenes = kotlin.math.abs(durationSum - board.optInt("target_seconds")) <= 0.01 && sceneRows.all { row ->
-                (row.duration.toDoubleOrNull() ?: 0.0) >= 0.1 && (!row.mediaType.startsWith("video/") || (row.trimStart.toDoubleOrNull() ?: -1.0) in 0.0..3600.0) }
+                (row.duration.toDoubleOrNull() ?: 0.0) >= 0.1 && (!row.mediaType.startsWith("video/") ||
+                    (row.trimStart.toDoubleOrNull() ?: -1.0) in 0.0..3600.0 &&
+                    (row.trimEnd.isBlank() || (row.trimEnd.toDoubleOrNull() ?: -1.0) <= 3600.0 &&
+                        (row.trimEnd.toDoubleOrNull() ?: -1.0) - (row.trimStart.toDoubleOrNull() ?: 0.0) + 0.001 >= (row.duration.toDoubleOrNull() ?: 0.0))) }
             Button(onClick = { val rows = JSONArray(); sceneRows.forEach { row -> rows.put(JSONObject().put("media_id", row.mediaId).put("duration_seconds", row.duration.toDouble())
-                .apply { if (row.mediaType.startsWith("video/")) put("trim_start_seconds", row.trimStart.toDouble()) }) }; onSaveScenes(rows) },
+                .put("framing", row.framing).put("motion", row.motion).put("transition", row.transition).put("subtitle_style", row.subtitleStyle)
+                .apply { if (row.mediaType.startsWith("video/")) { put("trim_start_seconds", row.trimStart.toDouble())
+                    if (row.trimEnd.isNotBlank()) put("trim_end_seconds", row.trimEnd.toDouble()) } }) }; onSaveScenes(rows) },
                 enabled = !busy && validScenes && sceneRows != initialScenes) { Text("장면 구성 저장") }
             Text("기획 확인: ${current?.optString("status") ?: "현재 승인 없음"}")
         }
@@ -68,7 +87,9 @@ fun PlanPanel(task: JSONObject, plan: JSONObject?, checkpoints: JSONArray, busy:
     }
 }
 
-private data class SceneEditRow(val mediaId: String, val mediaType: String, val duration: String, val trimStart: String)
+private data class SceneEditRow(val mediaId: String, val mediaType: String, val duration: String, val trimStart: String, val trimEnd: String,
+    val framing: String, val motion: String, val transition: String, val subtitleStyle: String)
+private fun nextEffect(current: String, options: List<String>): String = options[(options.indexOf(current) + 1).mod(options.size)]
 
 @Composable
 fun DraftPanel(task: JSONObject, draft: JSONObject?, tracks: JSONArray, busy: Boolean,

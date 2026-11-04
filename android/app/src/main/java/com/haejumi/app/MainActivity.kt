@@ -30,12 +30,15 @@ import com.haejumi.app.data.ApiException
 import com.haejumi.app.data.BackendClient
 import com.haejumi.app.data.UploadAttempt
 import com.haejumi.app.feature.creator.CreatorWorkspace
+import com.haejumi.app.feature.personal.PersonalWorkspace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,6 +59,12 @@ private fun HaejumiHome(settings: SecureSettings, client: BackendClient) {
     var connection by remember { mutableStateOf("연결을 확인하지 않았습니다.") }
     var message by remember { mutableStateOf("") }
     var reply by remember { mutableStateOf("안녕하세요. 예투입니다. 무엇을 도와드릴까요?") }
+    var proposedActions by remember { mutableStateOf(JSONArray()) }
+    var conversationHistory by remember { mutableStateOf(JSONArray()) }
+    var textConsentId by remember { mutableStateOf<String?>(null) }
+    var textNotice by remember { mutableStateOf<JSONObject?>(null) }
+    var usageSummary by remember { mutableStateOf("") }
+    var consentChecked by remember { mutableStateOf(false) }
     val attempts = remember { mutableStateListOf<UploadAttempt>() }
     val uploadedIds = remember { mutableStateMapOf<String, String>() }
     var failedItemId by remember { mutableStateOf<String?>(null) }
@@ -110,6 +119,33 @@ private fun HaejumiHome(settings: SecureSettings, client: BackendClient) {
                     }, enabled = !running) { Text("안전하게 저장") }
                     OutlinedButton(onClick = { launchAction { client.check(); connection = "인증된 PC 서버에 연결되었습니다." } }, enabled = !running) { Text("연결 확인") }
                     Text(connection)
+                    HorizontalDivider()
+                    Text("외부 AI와 개인정보", style = MaterialTheme.typography.titleLarge)
+                    OutlinedButton(onClick = { launchAction {
+                        val usage = client.llmUsage(); textNotice = client.textNotice()
+                        val items = client.consents().getJSONArray("items")
+                        textConsentId = (0 until items.length()).map { items.getJSONObject(it) }
+                            .firstOrNull { it.optString("purpose") == "llm_text" }?.optString("consent_id")
+                        usageSummary = "외부 호출: ${if (usage.optBoolean("enabled") && usage.optBoolean("provider_ready")) "사용 가능" else "비활성"} · 오늘 예약 비용 $${usage.optDouble("daily_reserved_usd")} / $${usage.optDouble("daily_limit_usd")}, 이번 달 $${usage.optDouble("monthly_reserved_usd")} / $${usage.optDouble("monthly_limit_usd")}"
+                    } }, enabled = !running) { Text("동의·사용량 조회") }
+                    if (usageSummary.isNotBlank()) Text(usageSummary)
+                    Text("표시 비용은 추정 예약액이며 실제 청구액이 아닙니다. 동의만으로 유료 호출이 켜지지 않습니다.")
+                    textNotice?.let { notice ->
+                        Text(notice.optString("disclosure"))
+                        Text(notice.optString("provider_retention"), style = MaterialTheme.typography.bodySmall)
+                        if (textConsentId == null) {
+                            Row { Checkbox(checked = consentChecked, onCheckedChange = { consentChecked = it }); Text("전송 범위와 목적을 확인하고 24시간 동의합니다.") }
+                            Button(onClick = { launchAction {
+                                textConsentId = client.grantTextConsent(notice).getString("consent_id")
+                                consentChecked = false; connection = "예투 텍스트 해석 동의를 저장했습니다."
+                            } }, enabled = !running && consentChecked) { Text("동의 저장") }
+                        } else {
+                            Text("예투 텍스트 해석 동의가 활성 상태입니다.")
+                            OutlinedButton(onClick = { val id = textConsentId ?: return@OutlinedButton; launchAction {
+                                client.revokeConsent(id); textConsentId = null; connection = "동의를 철회했습니다."
+                            } }, enabled = !running) { Text("동의 철회") }
+                        }
+                    }
                     TextButton(onClick = { page = "home" }, enabled = !running) { Text("홈으로") }
                 }
                 "workspace" -> {
@@ -117,6 +153,7 @@ private fun HaejumiHome(settings: SecureSettings, client: BackendClient) {
                     if (current == null) { Text("제작 작업을 먼저 선택해 주세요.") }
                     else CreatorWorkspace(client, settings, current, Modifier.fillMaxWidth()) { page = "creator" }
                 }
+                "schedule", "wellness", "diary" -> PersonalWorkspace(client, page) { page = "home" }
                 "creator" -> {
                     Text("쇼츠 만들기", style = MaterialTheme.typography.titleLarge)
                     Text("직접 선택한 사진과 영상만 PC로 보냅니다. 최대 ${maxSelectedMedia}개입니다.")
@@ -157,15 +194,32 @@ private fun HaejumiHome(settings: SecureSettings, client: BackendClient) {
                 }
                 else -> {
                     Text(reply, style = MaterialTheme.typography.titleMedium)
+                    OutlinedButton(onClick = { launchAction { conversationHistory = client.assistantHistory() } }, enabled = !running) { Text("대화 이력 조회") }
+                    for (index in 0 until conversationHistory.length()) {
+                        val item = conversationHistory.getJSONObject(index)
+                        Text(item.optString("text")); Text(item.optString("reply"))
+                    }
+                    OutlinedButton(onClick = { launchAction { client.clearAssistantHistory(); conversationHistory = JSONArray() } }, enabled = !running && conversationHistory.length() > 0) { Text("대화 이력 삭제") }
                     OutlinedTextField(message, { message = it }, label = { Text("예투에게 무엇을 부탁할까요?") }, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { val text = message.trim(); if (text.isNotEmpty()) launchAction { reply = client.message(text); message = "" } }, enabled = !running && message.isNotBlank()) { Text("보내기") }
+                        Button(onClick = { val text = message.trim(); if (text.isNotEmpty()) launchAction {
+                            val result = client.messageResult(text, textConsentId, taskId); reply = result.optString("reply"); proposedActions = result.optJSONArray("actions") ?: JSONArray(); conversationHistory = client.assistantHistory(); message = ""
+                        } }, enabled = !running && message.isNotBlank()) { Text("보내기") }
                         OutlinedButton(onClick = {}, enabled = false) { Text("음성 입력 준비 중") }
                     }
+                    for (index in 0 until proposedActions.length()) {
+                        val action = proposedActions.getJSONObject(index)
+                        Text("실행 예정: ${action.optString("kind")}")
+                        Text(action.optJSONObject("planned_action")?.toString() ?: "조회 완료")
+                        val proposalId = action.optString("proposal_id")
+                        if (proposalId.isNotBlank()) Button(onClick = { launchAction {
+                            client.confirmProposal(proposalId); proposedActions = JSONArray(); reply = "선택한 작업을 저장했습니다. 해당 화면에서 다시 조회해 주세요."
+                        } }, enabled = !running) { Text("이 작업 확인 후 저장") }
+                    }
                     AgentCard("쇼츠 만들기", "Creator", true) { page = "creator" }
-                    AgentCard("일정 관리", "Schedule · 준비 중", false) {}
-                    AgentCard("생활·건강 관리", "Wellness · 준비 중", false) {}
-                    AgentCard("일기 작성", "Diary · 준비 중", false) {}
+                    AgentCard("일정 관리", "Schedule · 기록 저장·조회", true) { page = "schedule" }
+                    AgentCard("생활·건강 관리", "Wellness · 기록 저장·조회", true) { page = "wellness" }
+                    AgentCard("일기 작성", "Diary · 초안·승인", true) { page = "diary" }
                     Text("최근 작업", style = MaterialTheme.typography.titleMedium)
                     Text(if (taskId == null) "기록된 제작 작업이 없습니다." else "최근 제작 작업: $taskStatus")
                     if (taskId != null) TextButton(onClick = { launchAction { taskStatus = client.taskStatus(taskId!!) } }, enabled = !running) { Text("작업 상태 확인") }

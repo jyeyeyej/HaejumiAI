@@ -46,11 +46,19 @@ export function UploadCard({ api, onCreated }) {
   async function upload() {
     if (!api || !items.length) return;
     controller.current = new AbortController(); setBusy(true);
+    const pending = items.filter((item) => !item.mediaId);
     try {
-      const ids = await api.uploadMany(items, { keys: batchKeys.current, signal: controller.current.signal, onStep: setMessage });
-      setItems((current) => current.map((entry, index) => ({ ...entry, mediaId: ids[index], status: '완료' })));
+      const ids = await api.uploadMany(pending, { keys: batchKeys.current, signal: controller.current.signal, onStep: setMessage,
+        onItem: (index, status) => setItems((current) => current.map((entry) => entry.id === pending[index].id ? { ...entry, status } : entry)) });
+      const byId = new Map(pending.map((item, index) => [item.id, ids[index]]));
+      setItems((current) => current.map((entry) => byId.has(entry.id) ? { ...entry, mediaId: byId.get(entry.id), status: '완료' } : entry));
       setMessage('선택한 파일의 서버 검사가 완료됐습니다. 프로젝트를 만들 수 있습니다.');
-    } catch (error) { setItems((current) => current.map((entry) => entry.mediaId ? entry : { ...entry, status: '재시도 가능' })); setMessage(error.name === 'AbortError' ? '업로드를 취소했습니다. 같은 선택으로 다시 시도할 수 있습니다.' : error.message); }
+    } catch (error) {
+      const failed = error.itemIndex ? pending[error.itemIndex - 1] : null;
+      setItems((current) => current.map((entry) => entry.id === failed?.id ? { ...entry, status: '검사 실패' } : entry));
+      setMessage(error.name === 'AbortError' ? '업로드를 취소했습니다. 같은 선택으로 다시 시도할 수 있습니다.' :
+        `${failed ? `${error.itemIndex}번 파일 (${failed.file.name}): ` : ''}${error.message}`);
+    }
     finally { controller.current = null; setBusy(false); }
   }
   async function create() {

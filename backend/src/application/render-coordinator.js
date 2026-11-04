@@ -40,7 +40,8 @@ export function createRenderCoordinator({ repositories, renderer }) {
       });
       if (!controller.signal.aborted) repositories.finishRenderJob(jobId, result);
     } catch (error) {
-      if (!controller.signal.aborted) repositories.failRenderJob(jobId, error?.code || 'RENDER_FAILED');
+      if (!controller.signal.aborted) repositories.failRenderJob(jobId, error?.code || 'RENDER_FAILED', {
+        failureStage: error?.failureStage, exitCode: error?.exitCode, diagnosticCode: error?.diagnosticCode });
     } finally {
       controllers.delete(jobId);
     }

@@ -2,6 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ApiError, HaejumiApi, checkFile, manifestHash, sha256 } from '../src/api.js';
 
+test('PC web exchanges Bearer once for a persistent HttpOnly session and sends CSRF header on writes', async () => {
+  const calls = [];
+  const fetcher = async (path, options) => {
+    calls.push({ path, options });
+    return path === '/api/v1/auth/web-session' && options.method === 'DELETE' ? new Response(null, { status: 204 }) : Response.json({ authenticated: true, items: [] });
+  };
+  const api = await HaejumiApi.signIn('synthetic-token', fetcher);
+  await api.status(); await api.projects();
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  await api.approve(id, { checkpoint_id: id, content_version: 1, content_hash: 'a'.repeat(64) }, 'session-test-key-0001');
+  await api.logout();
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-token');
+  assert.equal(calls[0].options.headers['X-Haejumi-Web'], '1');
+  assert.equal(calls.slice(1).every(({ options }) => !options.headers.Authorization && options.credentials === 'same-origin'), true);
+  assert.equal(calls[3].options.headers['X-Haejumi-Web'], '1');
+  assert.equal(calls[4].options.method, 'DELETE');
+});
+
 test('web API sends bearer only to relative /api/v1 paths and binds writes to version/hash', async () => {
   const calls = [];
   const api = new HaejumiApi('test-token', async (path, options) => {
@@ -17,6 +35,62 @@ test('web API sends bearer only to relative /api/v1 paths and binds writes to ve
   assert.equal(calls[1].options.headers['Idempotency-Key'], 'key-for-approval-0001');
   assert.deepEqual(JSON.parse(calls[1].options.body), { checkpoint_id: id, content_version: 3, content_hash: 'a'.repeat(64), approval_scope: 'continue' });
   await assert.rejects(() => api.request('https://other.example/api/v1/tasks'), /허용되지 않은/);
+});
+
+test('publication metadata and final approval use owner-authenticated API without SNS calls', async () => {
+  const calls = [];
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const api = new HaejumiApi('synthetic-token', async (path, options) => {
+    calls.push({ path, options }); return Response.json({ items: [] });
+  });
+  await api.publications(id);
+  await api.createPublication(id, { platform: 'youtube', account_id: 'my-account', visibility: 'private', title: '제목', description: '', hashtags: [] }, 'publication-create-key-001');
+  await api.approvePublication(id, id, { content_version: 2, content_hash: 'a'.repeat(64), artifact_sha256: 'b'.repeat(64),
+    publication_revision: 1, publication_hash: 'c'.repeat(64) }, 'publication-approve-key-001');
+  assert.equal(calls.length, 3);
+  assert.equal(calls.every(({ path, options }) => path.startsWith('/api/v1/') && options.headers.Authorization === 'Bearer synthetic-token'), true);
+  assert.equal(calls[2].path, `/api/v1/tasks/${id}/publications/${id}/approvals`);
+  assert.equal(JSON.parse(calls[2].options.body).artifact_sha256, 'b'.repeat(64));
+});
+
+test('privacy notice, consent and usage requests stay on the authenticated local API', async () => {
+  const calls = [];
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const api = new HaejumiApi('synthetic-token', async (path, options) => {
+    calls.push({ path, options }); return Response.json({ items: [] });
+  });
+  await api.llmUsage(); await api.privacyNotice(); await api.consents();
+  await api.grantTextConsent({ notice_id: id, notice_version: '1' }, 'consent-create-key-001');
+  await api.revokeConsent(id, 'consent-revoke-key-001');
+  assert.equal(calls.every(({ path, options }) => path.startsWith('/api/v1/') && options.headers.Authorization === 'Bearer synthetic-token'), true);
+  assert.equal(JSON.parse(calls[3].options.body).resource_ids.length, 0);
+  assert.equal(calls[4].options.method, 'DELETE');
+});
+
+test('Vision consent names only selected media and plan request passes its scoped consent', async () => {
+  const calls = [];
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const mediaId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const api = new HaejumiApi('synthetic-token', async (path, options) => {
+    calls.push({ path, options }); return Response.json({ consent_id: id });
+  });
+  await api.grantVisionConsent({ notice_id: id, notice_version: '1' }, [mediaId], 'vision-consent-key-0001');
+  await api.revisePlan(id, 2, '밝고 귀엽게', 'vision-plan-key-0001', id);
+  const consent = JSON.parse(calls[0].options.body);
+  assert.deepEqual(consent.resource_ids, [mediaId]);
+  assert.equal(consent.purpose, 'vision_analysis');
+  assert.deepEqual(consent.data_categories, ['selected_media', 'user_text']);
+  assert.equal(JSON.parse(calls[1].options.body).privacy_consent_id, id);
+});
+
+test('trend metadata request remains on authenticated local API with a bounded period', async () => {
+  const calls = [];
+  const api = new HaejumiApi('synthetic-token', async (path, options) => { calls.push({ path, options }); return Response.json({ status: 'unavailable', items: [] }); });
+  await api.trends('cafe', 30);
+  assert.equal(calls[0].path, '/api/v1/trends/search?topic=cafe&days=30');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-token');
+  assert.throws(() => api.trends('other', 30), /검색 조건/);
+  assert.equal(calls.length, 1);
 });
 
 test('selected upload uses one file, SHA-256 manifest, and per-step idempotency keys', async () => {
@@ -67,6 +141,14 @@ test('authentication and concurrent revision errors have safe messages', async (
     const api = new HaejumiApi('test-token', async () => Response.json({ error: { code: 'VERSION_CONFLICT', secret: 'must not display' } }, { status }));
     await assert.rejects(() => api.projects(), (error) => error instanceof ApiError && error.status === status && !error.message.includes('must not display'));
   }
+});
+
+test('upload errors disclose a safe file number and enforce 50 MiB per file', async () => {
+  assert.throws(() => checkFile({ name: 'large.jpg', type: 'image/jpeg', size: 50 * 1024 * 1024 + 1 }), /50 MiB/);
+  const api = new HaejumiApi('test-token', async () => Response.json({ error: {
+    code: 'VALIDATION_ERROR', item_index: 16, field: 'file_structure', secret: 'private path' } }, { status: 422 }));
+  await assert.rejects(() => api.projects(), (error) => error instanceof ApiError && error.itemIndex === 16 &&
+    error.field === 'file_structure' && /내부 구조/.test(error.message) && !error.message.includes('private path'));
 });
 
 test('preview accepts only authenticated FFmpeg MP4 with matching artifact hash', async () => {

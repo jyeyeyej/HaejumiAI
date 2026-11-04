@@ -23,5 +23,6 @@ test('Supervisor routes unique intents and asks for clarification on ambiguity o
   assert.equal(router.route('오늘 일기 써줘').module_id, 'diary');
   assert.equal(router.route('오늘 일정 정리해서 일기 써줘').status, 'needs_clarification');
   assert.equal(router.route('블로그 포스팅 작성해줘').status, 'disabled');
-  assert.equal(router.route('안녕하세요').status, 'needs_clarification');
+  assert.equal(router.route('안녕하세요').status, 'conversation');
+  assert.equal(router.route('오늘 기분이 안 좋아요').status, 'conversation');
 });

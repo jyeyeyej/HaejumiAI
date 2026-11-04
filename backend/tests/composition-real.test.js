@@ -6,6 +6,7 @@ import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { buildAss, createFFmpegRenderer } from '../src/media-engine/ffmpeg-renderer.js';
+import { CreatorAgent } from '../src/agents/creator-agent.js';
 
 const installed = ['ffmpeg', 'ffprobe'].every((name) => spawnSync(name, ['-version'], { stdio: 'ignore', windowsHide: true }).status === 0);
 
@@ -28,7 +29,7 @@ test('real FFmpeg combines five synthetic photos and two videos into one verifie
   }
   const renderer = createFFmpegRenderer({ mediaRoot, outputRoot });
   const scenes = mediaItems.map((item, index) => ({ order: index + 1, media_id: item.mediaId, start_seconds: index,
-    end_seconds: index + 1, ...(item.mediaType.startsWith('video/') ? { trim_start_seconds: 0.25 } : {}) }));
+    end_seconds: index + 1, ...(item.mediaType.startsWith('video/') ? { trim_start_seconds: 0.25, trim_end_seconds: 1.25 } : {}) }));
   const result = await renderer.render({ mediaItems, scenes, targetSeconds: 7, framing: 'fit_pad', projectId: randomUUID(), version: 1 });
   assert.equal(result.verified, true);
   assert.equal(result.verification.width, 1080); assert.equal(result.verification.height, 1920);
@@ -57,8 +58,22 @@ test('real FFmpeg burns Korean captions and mixes original and music with fades'
   ff('-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '3', '-c:a', 'pcm_s16le', music);
   const renderer = createFFmpegRenderer({ mediaRoot, outputRoot });
   const mediaId = randomUUID();
+  const captionText = '함께 걷는 이 순간';
+  const aiDraft = await new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () => ({ available: true,
+    usage: { calls_for_task: 1, estimated_cost_usd: 0.001 }, output: {
+      plan: { title_idea: '합성 영상', format: 'vertical_short', aspect_ratio: '9:16', target_seconds: 3,
+        theme: '함께 걷기', opening_hook: '이 순간을 볼까요?', story_flow: '한 장면을 보여줍니다.', mood: '밝음', ending_line: captionText,
+        recommended_media_order: [mediaId],
+        media_insights: [{ media_id: mediaId, description: '합성 테스트 화면입니다.', mood: '밝음', subjects: [], usable_detail: '색상', uncertainty: '', category: 'other', orientation: 'landscape' }],
+        scenes: [{ order: 1, media_id: mediaId, media_type: 'video/mp4', start_seconds: 0, end_seconds: 3,
+          visual_direction: '합성 화면을 사용합니다.', caption_text: captionText }] },
+      captions: [{ order: 1, start_seconds: 0, end_seconds: 3, text: captionText }],
+    } }) } }).createPlan({ ownerId: 'synthetic-owner', taskId: 'synthetic-task', project: { target_seconds: 3 },
+    media: [{ mediaId, mediaType: 'video/mp4', imageDataUrl: 'data:image/jpeg;base64,c3ludGhldGlj' }],
+    requestText: '밝은 분위기', privacyConsentId: 'synthetic-consent' });
+  assert.equal(aiDraft.generation.source, 'mock');
   const result = await renderer.render({ mediaItems: [{ mediaId, mediaType: 'video/mp4', fileName: 'source.mp4', storageKey: 'source.mp4' }], targetSeconds: 3, framing: 'fit_pad', projectId: randomUUID(), version: 1,
-    captions: [{ order: 1, start_seconds: 0, end_seconds: 3, text: '안녕하세요 테스트 자막입니다' }], musicPath: music,
+    captions: aiDraft.captions, musicPath: music,
     composition: { captions_enabled: true, source_volume: 0.8, music_volume: 0.6, fade_in_seconds: 0.5, fade_out_seconds: 0.5 } });
   assert.equal(result.mode, 'ffmpeg'); assert.equal(result.verified, true);
   assert.deepEqual(result.source_audio_media_ids, [mediaId]);

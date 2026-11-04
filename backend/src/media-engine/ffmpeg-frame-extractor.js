@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 /** Extracts one low-resolution frame from each user-selected video, entirely locally. */
 export function createFFmpegFrameExtractor({ ffmpegPath = 'ffmpeg', timeoutMs = 15_000 } = {}) {
   return async function extractFrame(path) {
-    const args = ['-v', 'error', '-i', path, '-vf', 'thumbnail,scale=768:-2', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'];
+    const args = ['-v', 'error', '-i', path, '-map_metadata', '-1', '-vf', 'thumbnail,scale=768:-2', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'];
     return new Promise((resolve, reject) => {
       const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
       const chunks = []; let size = 0;

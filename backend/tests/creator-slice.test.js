@@ -110,11 +110,14 @@ test('mixed multi upload retains staged parts, validates ordered manifest, and c
   const sceneEdit = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'PUT', headers: { ...json, 'idempotency-key': 'multi-scene-edit-0001' },
     body: JSON.stringify({ content_version: generated.content_version, content_hash: generated.content_hash,
       scenes: reversed.map((media_id, index) => ({ media_id, duration_seconds: index === 0 ? 6 : 4,
-        ...(media_id === project.media_ids[1] ? { trim_start_seconds: 0.25 } : {}) })) }) });
+        ...(index === 0 ? { framing: 'blur_pad', motion: 'zoom_in', transition: 'fade', subtitle_style: 'emphasis', bgm_mood: '따뜻함', edit_reason: '장면 강조' } : {}),
+        ...(media_id === project.media_ids[1] ? { trim_start_seconds: 0.25, trim_end_seconds: (index === 0 ? 6 : 4) + 0.25 } : {}) })) }) });
   assert.equal(sceneEdit.status, 200, await sceneEdit.clone().text());
   const edited = await sceneEdit.json();
   assert.equal(edited.content_version, generated.content_version + 1);
   assert.deepEqual(edited.plan.scenes.map((scene) => scene.media_id), reversed);
+  assert.equal(edited.plan.scenes[0].framing, 'blur_pad');
+  assert.equal(edited.plan.scenes[0].motion, 'zoom_in');
   assert.equal((await fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST', headers: { ...json, 'idempotency-key': 'multi-stale-approve-0001' },
     body: JSON.stringify({ checkpoint_id: generated.checkpoint.checkpoint_id, content_version: generated.content_version,
       content_hash: generated.content_hash, approval_scope: 'continue' }) })).status, 409);

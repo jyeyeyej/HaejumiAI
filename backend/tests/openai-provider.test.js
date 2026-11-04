@@ -7,6 +7,20 @@ import { CreatorAgent } from '../src/agents/creator-agent.js';
 
 const planResult = { plan: { title_idea: '카페', format: 'vertical_short', aspect_ratio: '9:16', target_seconds: 30, scenes: [] }, captions: [] };
 
+test('OpenAI adapter sends only the consented text for assistant interpretation', async () => {
+  let body;
+  const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', fetchImpl: async (_url, init) => {
+    body = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ output: [{ content: [{ type: 'output_text', text: JSON.stringify({ module_id: 'schedule', normalized_command: '' }) }] }] }) };
+  } });
+  const result = await provider.generateStructured({ prompt: 'Classify', input: { operation: 'assistant_route', request: '내일 일정 확인해 줘' } });
+  assert.equal(result.module_id, 'schedule');
+  assert.equal(body.store, false);
+  assert.equal(body.input[0].content.length, 1);
+  assert.equal(body.input[0].content[0].type, 'input_text');
+  assert.match(body.input[0].content[0].text, /내일 일정/);
+});
+
 test('OpenAI adapter uses Responses JSON output, selected image data, no storage, and a bounded timeout', async () => {
   let seen = null;
   const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', timeoutMs: 2500, estimatedCostUsd: 0.02,
@@ -20,10 +34,11 @@ test('OpenAI adapter uses Responses JSON output, selected image data, no storage
   assert.equal(seen.url, 'https://api.openai.com/v1/responses');
   assert.equal(seen.init.headers.Authorization, 'Bearer synthetic-only-test-key');
   assert.equal(seen.body.store, false);
-  assert.equal(seen.body.max_output_tokens, 2500);
+  assert.equal(seen.body.max_output_tokens, 6000);
   assert.equal(seen.body.input[0].content.some((item) => item.type === 'input_image' && item.image_url.includes('c3ludGhldGlj')), true);
   assert.match(seen.body.input[0].content[0].text, /selected-media-1/);
   assert.match(seen.body.input[0].content[0].text, /visual_input_available/);
+  assert.match(seen.body.input[0].content[1].text, /media_id=selected-media-1/);
   assert.equal(seen.init.signal instanceof AbortSignal, true);
 });
 
@@ -76,6 +91,9 @@ test('Creator scene result is built from only selected, locally prepared media a
   let captured = null;
   const provider = { providerId: 'openai', mode: 'external', estimateCostUsd: async () => 0.001,
     generateStructured: async ({ input }) => { captured = input; return { plan: { title_idea: '카페 쇼츠', format: 'vertical_short', aspect_ratio: '9:16', target_seconds: 30,
+      theme: '카페의 한 장면', opening_hook: '달콤한 순간, 볼까요?', story_flow: '커피와 디저트를 차례로 보여줍니다.', mood: '포근함', ending_line: '오늘의 작은 쉼표',
+      recommended_media_order: ['selected-image-id'],
+      media_insights: [{ media_id: 'selected-image-id', description: '커피와 디저트가 보입니다.', mood: '포근함', subjects: ['커피', '디저트'], usable_detail: '컵과 접시', uncertainty: '', category: 'cafe', orientation: 'landscape' }],
       scenes: [{ order: 1, media_id: 'selected-image-id', media_type: 'image/jpeg', start_seconds: 0, end_seconds: 30, visual_direction: '커피와 디저트 장면', caption_text: '달콤한 카페 시간' }] },
       captions: [{ order: 1, start_seconds: 0, end_seconds: 30, text: '달콤한 카페 시간' }] }; } };
   const gateway = new LLMGateway({ enabled: true, provider, privacyGate: new PrivacyGate({ enabled: true, providerAllowlist: ['openai'], consentVerifier: async (context) =>
@@ -88,4 +106,5 @@ test('Creator scene result is built from only selected, locally prepared media a
   assert.equal(captured.media[0].image_data_url, 'data:image/jpeg;base64,cHJlcGFyZWQ=');
   assert.equal(result.plan.scenes[0].visual_direction, '커피와 디저트 장면');
   assert.equal(result.generation.source, 'gateway');
+  assert.equal(result.plan.media_insights[0].subjects[0], '커피');
 });
