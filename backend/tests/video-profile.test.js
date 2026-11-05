@@ -26,6 +26,7 @@ test('fit_pad preserves the full frame and fill_crop accepts a user focal point'
 
 test('render command emits vertical 1080p 30fps H.264 MP4 with AAC audio', () => {
   const args = buildRenderArgs([{ kind: 'image', path: 'photo.jpg' }, { kind: 'video', path: 'clip.mp4' }], 'result.mp4', { targetSeconds: 30 });
+  assert.deepEqual(args.slice(args.indexOf('-loop'), args.indexOf('-i') + 2), ['-loop', '1', '-framerate', '1', '-t', '16', '-i', 'photo.jpg']);
   assert.ok(args.includes('libx264'));
   assert.ok(args.includes('aac'));
   assert.ok(args.includes('30'));

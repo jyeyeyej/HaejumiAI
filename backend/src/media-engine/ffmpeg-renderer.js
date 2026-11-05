@@ -28,11 +28,12 @@ export function createFFmpegRenderer({ mediaRoot, outputRoot, ffmpegPath = 'ffmp
       if (!Array.isArray(mediaItems) || mediaItems.length < 1 || mediaItems.length > 30) throw renderError('VALIDATION_ERROR', '선택 미디어는 1~30개여야 합니다.');
       if (!/^[0-9a-f-]{36}$/i.test(projectId) || !Number.isSafeInteger(version) || version < 1) throw renderError('VALIDATION_ERROR', '프로젝트 ID 또는 버전을 확인해 주세요.');
 
-      const inputs = mediaItems.map((item) => ({ ...resolveInput(safeMediaRoot, item), mediaId: item.mediaId }));
+      const inputs = mediaItems.map((item) => ({ ...resolveInput(safeMediaRoot, item), mediaId: item.mediaId, mediaType: item.mediaType }));
       const timeline = validatedTimeline(inputs, scenes, targetSeconds);
       const outputName = `${projectId}-v${version}-${randomUUID()}.mp4`;
       const outputPath = safeStoragePath(safeOutputRoot, outputName);
       let temporaryDir = null;
+      const temporaryFiles = [];
       try {
         if (musicPath) {
           const musicRoot = resolve(safeOutputRoot, '..', 'music');
@@ -49,16 +50,35 @@ export function createFFmpegRenderer({ mediaRoot, outputRoot, ffmpegPath = 'ffmp
           const info = lstatSync(reuseVideo.path);
           if (!info.isFile() || info.isSymbolicLink() || sha256(readFileSync(reuseVideo.path)) !== reuseVideo.sha256) throw renderError('VERSION_CONFLICT', '이전 렌더 파일이 변경되었습니다.');
         }
+        if (!reuseVideo) {
+          for (const [index, input] of inputs.entries()) {
+            if (input.mediaType !== 'image/jpeg' || !readFileSync(input.path).includes(Buffer.from('MPF\0', 'ascii'))) continue;
+            // FFmpeg can stall at fps conversion when looping an MPF JPEG. Decode
+            // its primary image once; keep the uploaded original untouched.
+            if (!temporaryDir) {
+              temporaryDir = safeStoragePath(safeOutputRoot, `caption-${randomUUID()}`);
+              mkdirSync(temporaryDir, { mode: 0o700 });
+            }
+            const normalizedPath = join(temporaryDir, `media-${index}.png`);
+            temporaryFiles.push(normalizedPath);
+            await runProcess(spawn, ffmpegPath, ['-hide_banner', '-nostdin', '-loglevel', 'error', '-i', input.path,
+              '-map', '0:v:0', '-frames:v', '1', '-an', '-c:v', 'png', normalizedPath],
+              Math.min(timeoutMs, 60_000), 'RENDER_FAILED', signal);
+            input.path = normalizedPath;
+          }
+        }
         if (captions.length && !reuseVideo) {
-          temporaryDir = safeStoragePath(safeOutputRoot, `caption-${randomUUID()}`);
-          mkdirSync(temporaryDir, { mode: 0o700 });
+          if (!temporaryDir) {
+            temporaryDir = safeStoragePath(safeOutputRoot, `caption-${randomUUID()}`);
+            mkdirSync(temporaryDir, { mode: 0o700 });
+          }
           const font = fileURLToPath(new URL('../../assets/fonts/NotoSansKR-Regular.otf', import.meta.url));
           copyFileSync(font, join(temporaryDir, 'NotoSansKR-Regular.otf'), constants.COPYFILE_EXCL);
           if (sha256(readFileSync(join(temporaryDir, 'NotoSansKR-Regular.otf'))) !== CAPTION_FONT_SHA256) throw renderError('VALIDATION_ERROR', '자막 글꼴의 무결성을 확인할 수 없습니다.');
           writeFileSync(join(temporaryDir, 'captions.ass'), buildAss(captions, targetSeconds, scenes), { flag: 'wx', mode: 0o600 });
         }
         const args = reuseVideo ? buildAudioReuseArgs(inputs, reuseVideo.path, outputPath, { ...options, composition, musicPath, timeline }) :
-          buildRenderArgs(inputs, outputPath, { ...options, composition, musicPath, timeline, scenes, subtitleFile: temporaryDir ? 'captions.ass' : null });
+          buildRenderArgs(inputs, outputPath, { ...options, composition, musicPath, timeline, scenes, subtitleFile: captions.length ? 'captions.ass' : null });
         await runProcess(spawn, ffmpegPath, args, timeoutMs, 'RENDER_FAILED', signal, temporaryDir ?? undefined);
         if (signal?.aborted) throw renderError('JOB_CANCELLED', '렌더 작업이 취소되었습니다.');
         const verification = await inspectRenderedVideo({ spawn, ffprobePath, filePath: outputPath, timeoutMs, signal });
@@ -80,7 +100,9 @@ export function createFFmpegRenderer({ mediaRoot, outputRoot, ffmpegPath = 'ffmp
         throw error;
       } finally {
         if (temporaryDir) {
-          for (const name of ['captions.ass', 'NotoSansKR-Regular.otf']) { try { unlinkSync(join(temporaryDir, name)); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
+          for (const path of [...temporaryFiles, join(temporaryDir, 'captions.ass'), join(temporaryDir, 'NotoSansKR-Regular.otf')]) {
+            try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          }
           rmdirSync(temporaryDir);
         }
       }
@@ -122,7 +144,10 @@ export function buildRenderArgs(inputs, outputPath, options) {
   const args = ['-hide_banner', '-nostdin', '-y'];
   for (const [index, input] of inputs.entries()) {
     const segmentDuration = options.timeline?.[index].duration ?? secondsPerInput;
-    if (input.kind === 'image') args.push('-loop', '1', '-framerate', '30', '-t', String(segmentDuration));
+    // Decode a still once per second, then duplicate the scaled frame at the
+    // output filter's 30 fps. One extra source second lets fps fill the last
+    // (possibly fractional) scene second before the final trim.
+    if (input.kind === 'image') args.push('-loop', '1', '-framerate', '1', '-t', String(Math.ceil(segmentDuration) + 1));
     if (input.kind === 'video' && options.timeline?.[index].trimStart) args.push('-ss', String(options.timeline[index].trimStart));
     if (input.kind === 'video' && options.timeline?.[index].trimEnd !== undefined) args.push('-t', String(options.timeline[index].trimEnd - options.timeline[index].trimStart));
     args.push('-i', input.path);

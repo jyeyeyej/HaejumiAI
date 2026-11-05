@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createFFmpegRenderer, buildAss } from '../src/media-engine/ffmpeg-renderer.js';
-import { proposeMixedEdit, summarizeTrend } from '../../shared/trend-edit.js';
+import { proposeBasicEdit, proposeMixedEdit, hasVisibleEditDifference, summarizeTrend } from '../../shared/trend-edit.js';
+import { sceneVideoFilters } from '../src/media-engine/scene-effects.js';
 
 const available = ['ffmpeg', 'ffprobe'].every((tool) => spawnSync(tool, ['-version'], { stdio: 'ignore', windowsHide: true }).status === 0);
 
@@ -49,7 +50,7 @@ test('mock trend plus Vision mixed edit renders synthetic photos and video with 
   t.after(() => { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true }); });
   const mediaRoot = join(root, 'media'); const outputRoot = join(root, 'out'); mkdirSync(mediaRoot); mkdirSync(outputRoot);
   const ff = (...args) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-  ff('-f', 'lavfi', '-i', 'color=c=red:s=640x360', '-frames:v', '1', join(mediaRoot, 'food.jpg'));
+  ff('-f', 'lavfi', '-i', 'color=c=0x9b5540:s=640x360', '-frames:v', '1', join(mediaRoot, 'food.jpg'));
   ff('-f', 'lavfi', '-i', 'color=c=blue:s=640x360', '-vf', 'drawbox=x=20:y=20:w=150:h=150:color=yellow:t=fill', '-frames:v', '1', join(mediaRoot, 'travel.jpg'));
   ff('-f', 'lavfi', '-i', 'color=c=green:s=640x360:r=30:d=3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(mediaRoot, 'cafe.mp4'));
   const ids = [randomUUID(), randomUUID(), randomUUID()];
@@ -64,25 +65,60 @@ test('mock trend plus Vision mixed edit renders synthetic photos and video with 
     items: [{ title: '합성 여행 브이로그', description: '', url: 'https://www.youtube.com/watch?v=abcDEF123_-',
       published_at: new Date(now.getTime() - 86400000).toISOString(), view_count: 500 }] };
   const proposal = proposeMixedEdit(plan, { source: 'mock' }, summarizeTrend(metadata, now));
+  const baseline = proposeBasicEdit(plan);
   assert.equal(proposal[0].media_id, ids[2]);
-  let start = 0;
-  const scenes = proposal.map((row, index) => { const scene = { ...row, order: index + 1, start_seconds: start,
-    end_seconds: Number((start + row.duration_seconds).toFixed(2)) }; start = scene.end_seconds; return scene; });
-  const mediaItems = proposal.map((row) => { const index = ids.indexOf(row.media_id); return { mediaId: row.media_id,
+  assert.equal(hasVisibleEditDifference(baseline, proposal), true);
+  const asScenes = (rows) => { let start = 0; return rows.map((row, index) => { const scene = { ...row,
+    order: index + 1, start_seconds: start, end_seconds: Number((start + row.duration_seconds).toFixed(2)) };
+    start = scene.end_seconds; return scene; }); };
+  const scenes = asScenes(proposal);
+  const basicScenes = asScenes(baseline);
+  const mediaFor = (rows) => rows.map((row) => { const index = ids.indexOf(row.media_id); return { mediaId: row.media_id,
     mediaType: types[index], fileName: names[index], storageKey: names[index] }; });
-  const output = await createFFmpegRenderer({ mediaRoot, outputRoot }).render({ mediaItems, scenes, captions: [],
+  const captionsFor = (sceneRows) => sceneRows.map((scene, index) => ({ order: index + 1,
+    start_seconds: Number((scene.start_seconds + 0.15).toFixed(2)),
+    end_seconds: Number(Math.min(scene.end_seconds - 0.15, scene.start_seconds + 0.9).toFixed(2)),
+    text: `${{ [ids[0]]: '음식 장면', [ids[1]]: '카페 장면', [ids[2]]: '여행 장면' }[scene.media_id]}` }));
+  const baseFilters = sceneVideoFilters(0, { framing: 'fit_pad', focalX: 0.5, focalY: 0.5 }, basicScenes[0], basicScenes[0].end_seconds, 'image').join(';');
+  const trendFilters = sceneVideoFilters(0, { framing: 'fit_pad', focalX: 0.5, focalY: 0.5 }, scenes[0], scenes[0].end_seconds, 'image').join(';');
+  assert.doesNotMatch(baseFilters, /colorbalance|eq=|zoompan/);
+  assert.match(trendFilters, /colorbalance/);
+  assert.match(trendFilters, /zoompan/);
+  assert.match(buildAss(captionsFor(scenes), 6, scenes), /,Emphasis,/);
+  const renderer = createFFmpegRenderer({ mediaRoot, outputRoot });
+  const basicOutput = await renderer.render({ mediaItems: mediaFor(baseline), scenes: basicScenes, captions: captionsFor(basicScenes),
     targetSeconds: 6, framing: 'fit_pad', projectId: randomUUID(), version: 1 });
+  const output = await renderer.render({ mediaItems: mediaFor(proposal), scenes, captions: captionsFor(scenes),
+    targetSeconds: 6, framing: 'fit_pad', projectId: randomUUID(), version: 1 });
+  assert.equal(basicOutput.verified, true);
   assert.equal(output.verified, true);
+  assert.equal(basicOutput.verification.duration_seconds > 5.8, true);
   assert.equal(output.verification.width, 1080); assert.equal(output.verification.height, 1920);
   assert.equal(output.verification.fps, 30); assert.equal(output.verification.video_codec, 'h264');
   assert.equal(output.verification.audio_codec, 'aac');
-  const frame = (time) => ff('-ss', String(time), '-i', output.output_path, '-frames:v', '1', '-vf', 'scale=90:160',
+  const frame = (file, time) => ff('-ss', String(time), '-i', file, '-frames:v', '1', '-vf', 'scale=90:160',
     '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1');
-  const first = frame(0.5); const later = frame(1.5); const second = frame(scenes[1].start_seconds + 0.5);
+  const basicFirst = frame(basicOutput.output_path, 0.5);
+  const first = frame(output.output_path, 0.5); const later = frame(output.output_path, 1.5);
+  const second = frame(output.output_path, scenes[1].start_seconds + 0.5);
   assert.notDeepEqual(first, later, 'first travel photo zoom should change frames');
-  assert.notDeepEqual(first, second, 'scene transition should show different media');
+  const meanDifference = (a, b) => a.reduce((sum, value, index) => sum + Math.abs(value - b[index]), 0) / a.length;
+  const openingDifference = meanDifference(basicFirst, first);
+  assert.ok(openingDifference > 20, `basic and mixed opening frames must visibly differ: ${openingDifference}`);
+  const basicFood = frame(basicOutput.output_path, 0.5);
+  assert.ok(meanDifference(basicFood, second) > 5, 'the matching food media must show a distinct crop/color grade');
   const center = (bytes) => [...bytes.subarray((80 * 90 + 45) * 3, (80 * 90 + 45) * 3 + 3)];
+  assert.ok(center(basicFirst)[0] > center(basicFirst)[2], 'baseline food photo must appear first');
   assert.ok(center(first)[2] > center(first)[0], 'travel blue scene should appear first');
   assert.ok(center(second)[0] > center(second)[2], 'food red scene should follow the trend-selected opening');
+  assert.notDeepEqual(basicScenes.map((scene) => scene.media_id), scenes.map((scene) => scene.media_id));
+  assert.notDeepEqual(basicScenes.map((scene) => scene.end_seconds - scene.start_seconds),
+    scenes.map((scene) => scene.end_seconds - scene.start_seconds));
+  const cafe = scenes.find((scene) => scene.media_id === ids[1]);
+  const fadeStart = frame(output.output_path, cafe.start_seconds + 0.03);
+  const fadeMiddle = frame(output.output_path, cafe.start_seconds + 0.5);
+  const brightness = (bytes) => bytes.reduce((sum, value) => sum + value, 0) / bytes.length;
+  assert.ok(brightness(fadeStart) < brightness(fadeMiddle), 'cafe scene must brighten after the fade begins');
+  t.diagnostic(`synthetic basic/mixed MP4: opening mean RGB difference ${openingDifference.toFixed(1)}/255; order, duration, grade, fade and caption styles differ`);
   assert.ok(scenes.some((scene) => scene.transition === 'fade'));
 });

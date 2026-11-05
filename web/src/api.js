@@ -33,6 +33,7 @@ export async function manifestHash(itemId, hash, size) {
 export class ApiError extends Error {
   constructor(status, code, itemIndex = null, field = null) {
     super(status === 401 ? '인증에 실패했습니다. 토큰을 다시 확인해 주세요.' :
+      code === 'RENDER_IN_PROGRESS' ? '렌더 작업이 진행 중입니다. 작업을 취소하거나 완료된 뒤 프로젝트를 삭제해 주세요.' :
       code === 'IDEMPOTENCY_CONFLICT' ? '이전 요청과 파일 목록 또는 순서가 다릅니다. 다시 선택해 주세요.' :
       code === 'INVALID_STATE_TRANSITION' ? '업로드 세션이 만료되었거나 아직 전송되지 않은 파일이 있습니다. 다시 시도해 주세요.' :
       code === 'VERSION_CONFLICT' && field?.startsWith('file_') ? '전송된 파일의 크기나 해시가 처음 선택한 파일과 다릅니다. 다시 선택해 주세요.' :
@@ -97,8 +98,13 @@ export class HaejumiApi {
   projects() { return this.request('/api/v1/content/projects'); }
   task(id) { return this.request(`/api/v1/tasks/${safeId(id)}`); }
   project(id) { return this.request(`/api/v1/content/projects/${safeId(id)}`); }
+  deleteProject(id, contentVersion, contentHash, key = crypto.randomUUID()) { return this.request(`/api/v1/content/projects/${safeId(id)}`, {
+    method: 'DELETE', body: { content_version: contentVersion, content_hash: contentHash }, key }); }
   trends(topic, days = 30) { if (!['restaurant', 'cafe', 'travel'].includes(topic) || !Number.isInteger(days) || days < 1 || days > 90) throw new Error('트렌드 검색 조건을 확인해 주세요.');
     return this.request(`/api/v1/trends/search?topic=${topic}&days=${days}`); }
+  styleReferences(id) { return this.request(`/api/v1/tasks/${safeId(id)}/style-references`); }
+  addStyleReference(id, body, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/style-references`, { method: 'POST', body, key }); }
+  deleteStyleReference(id, referenceId, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/style-references/${safeId(referenceId)}`, { method: 'DELETE', key }); }
   checkpoints(id) { return this.request(`/api/v1/tasks/${safeId(id)}/checkpoints`); }
   plan(id) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`); }
   draft(id) { return this.request(`/api/v1/tasks/${safeId(id)}/draft`); }
@@ -118,14 +124,16 @@ export class HaejumiApi {
     body: { text, input_kind: 'typed_text', ...(taskId ? { task_id: safeId(taskId) } : {}),
       ...(consentId ? { privacy_consent_id: safeId(consentId) } : {}) } }); }
   confirmProposal(id, key = crypto.randomUUID()) { return this.request(`/api/v1/assistant/proposals/${safeId(id)}/confirm`, { method: 'POST', key }); }
-  revisePlan(id, version, text, key = crypto.randomUUID(), consentId = null) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`, {
-    method: 'POST', key, body: { content_version: version, request_text: text, ...(consentId ? { privacy_consent_id: safeId(consentId) } : {}) } }); }
+  revisePlan(id, version, text, key = crypto.randomUUID(), consentId = null, referenceIds = undefined) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`, {
+    method: 'POST', key, body: { content_version: version, request_text: text, ...(consentId ? { privacy_consent_id: safeId(consentId) } : {}),
+      ...(referenceIds === undefined ? {} : { reference_ids: referenceIds.map(safeId) }) } }); }
   approve(id, checkpoint, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/approvals`, {
     method: 'POST', key, body: { checkpoint_id: safeId(checkpoint.checkpoint_id), content_version: checkpoint.content_version,
       content_hash: checkpoint.content_hash, approval_scope: 'continue' } }); }
-  updateScenes(id, task, scenes, key = crypto.randomUUID(), trendQuery = undefined) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`, {
+  updateScenes(id, task, scenes, key = crypto.randomUUID(), trendQuery = undefined, referenceIds = undefined) { return this.request(`/api/v1/tasks/${safeId(id)}/plan`, {
     method: 'PUT', key, body: { content_version: task.current_version, content_hash: task.content_hash, scenes,
-      ...(trendQuery === undefined ? {} : { trend_query: trendQuery }) } }); }
+      ...(trendQuery === undefined ? {} : { trend_query: trendQuery }),
+      ...(referenceIds === undefined ? {} : { reference_ids: referenceIds.map(safeId) }) } }); }
   render(id, task, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(id)}/render`, {
     method: 'POST', key, body: { content_version: task.current_version, content_hash: task.content_hash } }); }
   cancel(jobId, key = crypto.randomUUID()) { return this.request(`/api/v1/jobs/${safeId(jobId)}/cancel`, { method: 'POST', key }); }
@@ -158,6 +166,7 @@ export class HaejumiApi {
     const itemId = keys.itemId ?? crypto.randomUUID();
     const init = await this.request('/api/v1/media/uploads', { method: 'POST', key: keys.initKey ?? crypto.randomUUID(), signal,
       body: { items: [{ client_item_id: itemId, file_name: file.name, declared_media_type: file.type, size_bytes: file.size, sha256: hash }] } });
+    if (init.status === 'rejected' || init.status === 'expired') throw new ApiError(409, 'INVALID_STATE_TRANSITION');
     if (init.status !== 'completed' && !init.accepted_items?.[0]?.received_parts?.includes(1)) {
       onStep('파일을 전송하고 있습니다.');
       await this.request(`/api/v1/media/uploads/${safeId(init.upload_id)}/parts/1`, { method: 'PUT', key: keys.partKey ?? crypto.randomUUID(), body: bytes, signal });
@@ -166,6 +175,35 @@ export class HaejumiApi {
     const completed = await this.request(`/api/v1/media/uploads/${safeId(init.upload_id)}/complete`, { method: 'POST', key: keys.completeKey ?? crypto.randomUUID(), signal,
       body: { manifest_sha256: await manifestHash(itemId, hash, file.size) } });
     return completed.media[0].media_id;
+  }
+
+  async uploadEach(items, { signal, onStep = () => {}, onItem = () => {} } = {}) {
+    if (!Array.isArray(items) || items.length < 1 || items.length > 30) throw new Error('선택한 파일 수를 확인해 주세요.');
+    const results = [];
+    for (const [index, item] of items.entries()) {
+      if (signal?.aborted) break;
+      onItem(index, { status: '전송 중', error: null });
+      try {
+        const mediaId = await this.upload(item.file, { signal, keys: item.keys,
+          onStep: (step) => onStep(`${index + 1}/${items.length} · ${step}`) });
+        results.push({ mediaId, error: null });
+        onItem(index, { status: '완료', mediaId, error: null });
+      } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') {
+          onItem(index, { status: '대기', error: null });
+          break;
+        }
+        const message = error instanceof ApiError ? error.message :
+          error?.message === 'JPEG·PNG·WebP·MP4·MOV 형식의 50 MiB 이하 파일을 선택해 주세요.' ? error.message :
+          '파일을 업로드하지 못했습니다. 연결과 파일 상태를 확인한 뒤 다시 시도해 주세요.';
+        const newSession = error instanceof ApiError && (error.status === 422 || error.code === 'INVALID_STATE_TRANSITION');
+        const update = { status: '실패', error: message, ...(newSession ? { keys: { ...item.keys,
+          initKey: crypto.randomUUID(), partKey: crypto.randomUUID(), completeKey: crypto.randomUUID() } } : {}) };
+        results.push({ mediaId: null, error: message });
+        onItem(index, update);
+      }
+    }
+    return { results, cancelled: Boolean(signal?.aborted) };
   }
 
   async uploadMany(items, { signal, onStep = () => {}, onItem = () => {}, keys = {} } = {}) {

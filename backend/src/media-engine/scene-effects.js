@@ -4,12 +4,21 @@ export const SCENE_FRAMING = Object.freeze(['inherit', 'fit_pad', 'fill_crop', '
 export const SCENE_MOTION = Object.freeze(['static', 'zoom_in', 'zoom_out', 'pan_left', 'pan_right']);
 export const SCENE_TRANSITION = Object.freeze(['cut', 'fade']);
 export const SUBTITLE_STYLES = Object.freeze(['default', 'emphasis', 'information']);
+export const EDIT_STYLES = Object.freeze(['basic', 'travel_warm', 'food_pop', 'cafe_soft', 'information']);
+
+const COLOR_FILTERS = Object.freeze({
+  travel_warm: 'eq=contrast=1.06:saturation=1.10:brightness=0.018,colorbalance=rs=0.08:gs=0.015:bs=-0.06',
+  food_pop: 'eq=contrast=1.16:saturation=1.38:brightness=0.015',
+  cafe_soft: 'eq=contrast=0.96:saturation=1.12:brightness=0.025,colorbalance=rs=0.055:gs=0.015:bs=-0.035',
+  information: 'eq=contrast=1.08:saturation=1.02',
+});
 
 export function validSceneEffects(scene) {
   return (!scene.framing || SCENE_FRAMING.includes(scene.framing)) &&
     (!scene.motion || SCENE_MOTION.includes(scene.motion)) &&
     (!scene.transition || SCENE_TRANSITION.includes(scene.transition)) &&
     (!scene.subtitle_style || SUBTITLE_STYLES.includes(scene.subtitle_style)) &&
+    (!scene.edit_style || EDIT_STYLES.includes(scene.edit_style)) &&
     (scene.bgm_mood === undefined || typeof scene.bgm_mood === 'string' && scene.bgm_mood.length <= 100) &&
     (scene.edit_reason === undefined || typeof scene.edit_reason === 'string' && scene.edit_reason.length <= 500);
 }
@@ -19,7 +28,8 @@ export function sceneVideoFilters(index, baseOptions, scene, duration, kind = 'i
   const framing = scene?.framing && scene.framing !== 'inherit' ? scene.framing : baseOptions.framing;
   const motion = scene?.motion ?? 'static';
   const transition = scene?.transition ?? 'cut';
-  if (!SCENE_FRAMING.includes(framing) || !SCENE_MOTION.includes(motion) || !SCENE_TRANSITION.includes(transition)) throw new Error('Invalid scene effect');
+  const editStyle = scene?.edit_style ?? 'basic';
+  if (!SCENE_FRAMING.includes(framing) || !SCENE_MOTION.includes(motion) || !SCENE_TRANSITION.includes(transition) || !EDIT_STYLES.includes(editStyle)) throw new Error('Invalid scene effect');
   const normalized = `n${index}`;
   const filters = [];
   if (framing === 'blur_pad') {
@@ -29,10 +39,16 @@ export function sceneVideoFilters(index, baseOptions, scene, duration, kind = 'i
     filters.push(`[blur${index}][front${index}]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[${normalized}]`);
   } else filters.push(`[${index}:v]${videoFilter({ ...baseOptions, framing })}[${normalized}]`);
   let source = `[${normalized}]`;
+  if (COLOR_FILTERS[editStyle]) {
+    filters.push(`${source}${COLOR_FILTERS[editStyle]}[c${index}]`);
+    source = `[c${index}]`;
+  }
   if (motion !== 'static') {
     const frames = Math.max(1, Math.round(duration * 30));
-    const zoom = motion === 'zoom_in' ? `min(1+0.12*on/${frames},1.12)` :
-      motion === 'zoom_out' ? `max(1.12-0.12*on/${frames},1)` : '1.12';
+    const zoomAmount = editStyle === 'food_pop' ? 0.24 : editStyle === 'travel_warm' ? 0.16 : editStyle === 'cafe_soft' ? 0.10 : 0.12;
+    const maximum = (1 + zoomAmount).toFixed(2);
+    const zoom = motion === 'zoom_in' ? `min(1+${zoomAmount}*on/${frames},${maximum})` :
+      motion === 'zoom_out' ? `max(${maximum}-${zoomAmount}*on/${frames},1)` : maximum;
     const x = motion === 'pan_left' ? `(iw-iw/zoom)*(1-on/${frames})` : motion === 'pan_right' ? `(iw-iw/zoom)*on/${frames}` : '(iw-iw/zoom)/2';
     filters.push(`${source}zoompan=z='${zoom}':x='${x}':y='(ih-ih/zoom)/2':d=1:s=1080x1920:fps=30[m${index}]`);
     source = `[m${index}]`;

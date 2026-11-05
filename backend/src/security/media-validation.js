@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const MAX_JPEG_TRAILER_BYTES = 1024;
 const CRC_TABLE = createCrcTable();
 const EXTENSIONS = new Map([
   ['image/jpeg', new Set(['.jpg', '.jpeg'])],
@@ -141,24 +142,35 @@ function validPngDepth(depth, color) {
   return allowed[color]?.includes(depth) === true;
 }
 
-function inspectJpeg(bytes) {
+function inspectJpeg(bytes, allowMpfCompanion = false, depth = 0) {
   if (bytes.length < 16 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
   let offset = 2;
   let sawFrame = false;
   let sawScan = false;
   let ended = false;
+  let hasMpf = false;
   while (offset < bytes.length) {
     if (bytes[offset] !== 0xff) return false;
     while (offset < bytes.length && bytes[offset] === 0xff) offset++;
     if (offset >= bytes.length) return false;
     const marker = bytes[offset++];
-    if (marker === 0xd9) { ended = offset === bytes.length; break; }
-    if (marker === 0x00 || marker === 0xd8 || marker >= 0xd0 && marker <= 0xd7 || marker === 0x01) return false;
+    // Some decodable JPEG exports append a small metadata trailer after EOI.
+    // Keep the trailer bounded; the full original bytes remain size/hash verified.
+    if (marker === 0xd9) {
+      const trailing = bytes.subarray(offset);
+      const companionStarts = trailing.length >= 2 && trailing[0] === 0xff && trailing[1] === 0xd8;
+      ended = companionStarts ? depth < 8 && (hasMpf || allowMpfCompanion) && inspectJpeg(trailing, true, depth + 1)
+        : trailing.length <= MAX_JPEG_TRAILER_BYTES;
+      break;
+    }
+    if (marker === 0x01) continue; // TEM is a standalone JPEG marker without a length field.
+    if (marker === 0x00 || marker === 0xd8 || marker >= 0xd0 && marker <= 0xd7) return false;
     if (offset + 2 > bytes.length) return false;
     const segmentLength = bytes.readUInt16BE(offset);
     if (segmentLength < 2 || offset + segmentLength > bytes.length) return false;
     const segmentStart = offset + 2;
     const segmentEnd = offset + segmentLength;
+    if (marker === 0xe2 && bytes.toString('ascii', segmentStart, segmentStart + 4) === 'MPF\0') hasMpf = true;
     if (isJpegFrameMarker(marker)) {
       if (segmentLength < 8) return false;
       const height = bytes.readUInt16BE(segmentStart + 1);

@@ -18,12 +18,24 @@ try {
     [projectId, ownerId, taskId]
   );
 
-  await pool.query(
-    `INSERT INTO haejumi_dev.creator_tasks
-     (task_id, project_id, owner_id, status, current_version)
-     VALUES ($1, $2, $3, 'rendering', 1)`,
-    [taskId, projectId, ownerId]
-  );
+  
+await pool.query(
+  `INSERT INTO haejumi_dev.creator_tasks
+   (task_id, project_id, owner_id, status,
+    current_version, content_hash, task_data)
+   VALUES ($1, $2, $3, 'rendering',
+           1, $4, $5::jsonb)`,
+  [
+    taskId,
+    projectId,
+    ownerId,
+    'test-hash',
+    JSON.stringify({
+      active_job_id: jobId
+    })
+  ]
+);
+
 
   await pool.query(
     `INSERT INTO haejumi_dev.creator_render_jobs

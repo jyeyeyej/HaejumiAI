@@ -76,6 +76,38 @@ test('Vision budget denial and invalid output remain labeled local empty drafts'
   assert.deepEqual(invalid.captions, []);
 });
 
+test('Vision Mock retains verified captions when five sampled photos produce scenes for a six-item project', async () => {
+  const media = Array.from({ length: 6 }, (_, index) => ({ mediaId: `photo-${index + 1}`, mediaType: 'image/jpeg',
+    ...(index < 5 ? { imageDataUrl: 'data:image/jpeg;base64,c3ludGhldGlj' } : {}) }));
+  const output = { plan: { title_idea: '하루의 풍경', scenes: media.slice(0, 5).map((item, index) => ({
+    order: index + 1, media_id: item.mediaId, media_type: item.mediaType, start_seconds: index * 6,
+    end_seconds: (index + 1) * 6, visual_direction: '확인된 장면', caption_text: index === 0 ? '하늘을 올려다봐요' : '',
+  })) }, captions: [
+    { order: 1, start_seconds: 0, end_seconds: 3.5, text: '하늘을 올려다봐요' },
+    { order: 2, start_seconds: 24, end_seconds: 27.5, text: '천천히 걸어가요' },
+    { order: 3, start_seconds: 27.5, end_seconds: 30, text: '장면 5를 소개합니다' },
+  ] };
+  let calls = 0;
+  const agent = new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () => {
+    calls += 1;
+    return { available: true, output, usage: { calls_for_task: 1, estimated_cost_usd: 0.01 } };
+  } } });
+  const result = await agent.createPlan({ ownerId: 'owner', taskId: 'task', project: { target_seconds: 30 }, media,
+    requestText: '풍경 쇼츠를 만들어줘', privacyConsentId: 'consent' });
+  assert.equal(calls, 1);
+  assert.equal(result.generation.source, 'mock');
+  assert.equal(result.generation.fallback_used, true);
+  assert.equal(result.generation.validation_field, 'SCENES_MEDIA_MISMATCH');
+  assert.equal(result.plan.scenes.length, 6);
+  assert.equal(result.plan.scenes[5].media_id, 'photo-6');
+  assert.equal(result.plan.scenes[5].caption_text, '');
+  assert.equal(result.plan.media_insights[5].category, 'unknown');
+  assert.deepEqual(result.captions.map((caption) => caption.text), ['하늘을 올려다봐요', '천천히 걸어가요']);
+  assert.equal(result.captions[1].start_seconds, 20);
+  assert.ok(result.captions[1].end_seconds <= 25);
+  assert.equal(validCaptionTimeline(result.captions, result.plan.scenes, 30), true);
+});
+
 test('Creator accepts labeled photo/video Mock insights and rejects template captions or unsupported output', async () => {
   const media = [{ mediaId: 'photo', mediaType: 'image/jpeg', imageDataUrl: 'data:image/jpeg;base64,cGhvdG8=' },
     { mediaId: 'clip', mediaType: 'video/mp4', imageDataUrl: 'data:image/jpeg;base64,ZnJhbWU=' }];

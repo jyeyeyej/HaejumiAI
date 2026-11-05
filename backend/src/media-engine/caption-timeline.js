@@ -3,7 +3,7 @@ import { CAPTION_TEXT_PATTERN } from './caption-font.js';
 export function validCaptionText(text, requestText = '') {
   if (typeof text !== 'string' || !text.trim() || [...text].length > 80 || !CAPTION_TEXT_PATTERN.test(text)) return false;
   const normalized = text.trim().replace(/\s+/gu, ' ');
-  if (/장면\s*\d+\s*을\s*소개합니다/u.test(normalized)) return false;
+  if (/장면\s*\d+\s*(?:을|를)\s*소개합니다/u.test(normalized)) return false;
   if (/(?:장면별\s*효과|기획안|자막\s*초안|AI\s*분석|편집\s*스타일).*(?:제안|만들|생성|분석)/u.test(normalized)) return false;
   if (requestText && normalized === requestText.trim().replace(/\s+/gu, ' ')) return false;
   return true;

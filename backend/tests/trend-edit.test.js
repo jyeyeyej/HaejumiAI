@@ -9,7 +9,7 @@ import { JsonState } from '../src/adapters/filesystem/json-state.js';
 import { LocalRepositories } from '../src/adapters/filesystem/repositories.js';
 import { createApiHandler } from '../src/adapters/node-http/transport.js';
 import { CreatorAgent } from '../src/agents/creator-agent.js';
-import { proposeMixedEdit, summarizeTrend } from '../../shared/trend-edit.js';
+import { proposeBasicEdit, proposeMixedEdit, hasVisibleEditDifference, summarizeTrend } from '../../shared/trend-edit.js';
 
 const NOW = new Date('2026-11-04T12:00:00.000Z');
 function result(topic, title) {
@@ -44,11 +44,14 @@ test('Vision categories mix supported scene effects; absent Vision keeps every s
   const rows = proposeMixedEdit(plan, { source: 'mock' }, trend);
   assert.equal(rows[0].media_id, ids[1]);
   assert.deepEqual(rows.map((row) => row.suggested_style), ['highlight', 'emotional', 'emotional', 'basic']);
+  assert.deepEqual(rows.map((row) => row.edit_style), ['food_pop', 'travel_warm', 'cafe_soft', 'basic']);
   assert.deepEqual(rows.map((row) => row.motion), ['zoom_in', 'zoom_in', 'pan_right', 'static']);
+  assert.equal(hasVisibleEditDifference(proposeBasicEdit(plan), rows), true);
   assert.ok(Math.abs(rows.reduce((sum, row) => sum + row.duration_seconds, 0) - 12) < 0.01);
   assert.ok(rows.every((row) => !row.edit_reason.includes('YouTube 영상 효과')));
   const local = proposeMixedEdit(plan, { source: 'local_rules' }, trend);
   assert.ok(local.every((row) => row.motion === 'static' && row.suggested_style === 'basic'));
+  assert.equal(hasVisibleEditDifference(proposeBasicEdit(plan), local), false);
   assert.deepEqual(proposeMixedEdit(plan, { source: 'mock' }, null).map((row) => row.media_id), ids);
 });
 
@@ -66,7 +69,7 @@ test('cached trend provenance is stored with scene edit and version invalidation
     randomUUID(), new CreatorAgent({ gateway: null }));
   const task = state.data.tasks[project.task_id];
   const scenes = [...plan.plan.scenes].reverse().map((scene) => ({ media_id: scene.media_id, duration_seconds: 3,
-    framing: 'blur_pad', motion: 'zoom_in', transition: 'fade', subtitle_style: 'default' }));
+    framing: 'blur_pad', motion: 'zoom_in', transition: 'fade', subtitle_style: 'default', edit_style: 'travel_warm' }));
   const input = { content_version: task.current_version, content_hash: task.content_hash, scenes,
     trend_query: { topic: 'travel', days: 30 } };
   assert.throws(() => repo.updateCreatorScenes(owner, project.task_id, input, randomUUID()), { code: 'TREND_CACHE_MISSING' });
@@ -93,6 +96,7 @@ test('cached trend provenance is stored with scene edit and version invalidation
   assert.equal(edited.plan.trend_reference.analysis_scope, 'metadata_only');
   assert.equal(edited.plan.trend_reference.references.length, 1);
   assert.deepEqual(edited.plan.scenes.map((scene) => scene.media_id), [...ids].reverse());
+  assert.ok(edited.plan.scenes.every((scene) => scene.edit_style === 'travel_warm'));
   assert.deepEqual(edited.plan.media_insights.map((insight) => insight.media_id), [...ids].reverse());
   assert.ok(repo.getOwnedCheckpoints(owner, project.task_id).some((item) => item.status === 'invalidated'));
   assert.equal(repo.getOwnedCreatorPlan(owner, project.task_id).plan.trend_reference.topic, 'travel');

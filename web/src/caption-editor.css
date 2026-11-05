@@ -8,3 +8,11 @@
 .caption-time-grid input,.caption-text-label textarea{display:block;width:100%;min-width:0}
 .caption-text-label textarea{min-height:92px;line-height:1.55;resize:vertical;overflow-wrap:anywhere}
 @media(max-width:480px){.caption-edit-card{padding:11px}.caption-time-grid{gap:8px}.caption-card-head strong{font-size:.88rem}}
+.edit-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}
+.edit-comparison>div{min-width:0;padding:12px;border:1px solid #dce8df;border-radius:12px;background:#f9fcf8}
+.edit-comparison ol{padding-left:20px;margin:8px 0 0;line-height:1.6;overflow-wrap:anywhere}
+@media(max-width:700px){.edit-comparison{grid-template-columns:1fr}}
+.project-entry{position:relative;border:1px solid #e5ebe6;border-radius:11px;margin:10px 0;background:#fff}
+.project-entry.selected{background:#eff7e9;border-color:#b9dbaa}
+.project-entry .project-row{margin:0;border:0;background:transparent;padding-right:78px}
+.project-entry .project-delete{position:absolute;right:10px;top:10px;padding:5px 9px!important;background:#f7e8e5!important;color:#8a4137!important;font-size:.76rem!important}

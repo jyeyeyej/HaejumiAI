@@ -8,6 +8,8 @@ import { CAPTION_FONT_SHA256 } from '../../media-engine/caption-font.js';
 import { validSceneEffects } from '../../media-engine/scene-effects.js';
 import { captionScene, validCaptionTimeline } from '../../media-engine/caption-timeline.js';
 import { summarizeTrend } from '../../../../shared/trend-edit.js';
+import { analyzeLocalStyleVideo, parseStyleReferenceUrl } from '../../media-engine/style-reference.js';
+import { resolveMediaToolPaths } from '../../media-engine/media-tool-paths.js';
 
 export const PRIVACY_NOTICE_ID = '610ef7d0-c730-4de0-b24c-5b80e9241d11';
 export const PRIVACY_NOTICE_VERSION = '1';
@@ -98,10 +100,10 @@ export class LocalRepositories {
         new Set(items.map((entry) => String(entry?.client_item_id ?? '').toLowerCase())).size !== items.length) throw apiError(422, 'VALIDATION_ERROR', '선택한 미디어 개수를 확인해 주세요.');
     if (items.length > 1) return this.createMultiUpload(ownerId, items, idempotencyKey);
     const item = items[0];
-    if (!item || !isSafeDisplayName(item.file_name) || !Number.isSafeInteger(item.size_bytes) || item.size_bytes < 1 ||
-        !/^[a-f\d]{64}$/i.test(item.sha256 ?? '') || !isUuid(item.client_item_id)) {
-      throw apiError(422, 'VALIDATION_ERROR', '선택한 미디어 선언을 확인해 주세요.');
-    }
+    if (!item || !isUuid(item.client_item_id)) throw uploadItemError(422, 'VALIDATION_ERROR', 0, 'client_item_id');
+    if (!isSafeDisplayName(item.file_name)) throw uploadItemError(422, 'VALIDATION_ERROR', 0, 'file_name');
+    if (!Number.isSafeInteger(item.size_bytes) || item.size_bytes < 1) throw uploadItemError(422, 'VALIDATION_ERROR', 0, 'size_bytes');
+    if (!/^[a-f\d]{64}$/i.test(item.sha256 ?? '')) throw uploadItemError(422, 'VALIDATION_ERROR', 0, 'sha256');
     if (item.size_bytes > this.maxMediaBytes) throw apiError(413, 'PAYLOAD_TOO_LARGE', '허용 크기를 초과했습니다.');
     if (!isAllowedMediaType(item.declared_media_type) || !extensionMatches(item.file_name, item.declared_media_type)) {
       throw apiError(415, 'UNSUPPORTED_MEDIA_TYPE', '파일 확장자와 선언한 미디어 형식이 일치하지 않습니다.');
@@ -133,7 +135,7 @@ export class LocalRepositories {
     if (upload.items) return { upload_id: upload.uploadId, status: upload.status, expires_at: upload.expiresAt,
       accepted_items: upload.items.map((item, index) => ({ client_item_id: item.clientItemId, received_parts: item.partHash ? [index + 1] : [] })) };
     return { upload_id: upload.uploadId, status: upload.status, expires_at: upload.expiresAt,
-      accepted_items: [{ client_item_id: upload.clientItemId, received_parts: upload.status === 'created' ? [] : [1] }] };
+      accepted_items: [{ client_item_id: upload.clientItemId, received_parts: ['uploading', 'completed'].includes(upload.status) ? [1] : [] }] };
   }
 
   putUploadPart(ownerId, uploadId, partNumber, bytes, idempotencyKey) {
@@ -223,7 +225,7 @@ export class LocalRepositories {
       removeRegularFile(partPath);
       const status = validation.code === 'VERSION_CONFLICT' ? 409 : validation.code === 'PAYLOAD_TOO_LARGE' ? 413
         : validation.code === 'UNSUPPORTED_MEDIA_TYPE' ? 415 : 422;
-      throw apiError(status, validation.code, '파일 형식·내용·크기·해시 검증에 실패했습니다.');
+      throw uploadItemError(status, validation.code, 0, validation.code === 'VALIDATION_ERROR' ? 'file_structure' : 'file_integrity');
     }
     const expectedManifest = sha256(canonicalManifestBytes([{ client_item_id: upload.clientItemId, sha256: validation.sha256, size_bytes: bytes.length }]));
     if (!manifest || String(manifest.manifest_sha256 ?? '').toLowerCase() !== expectedManifest) {
@@ -376,6 +378,72 @@ export class LocalRepositories {
     return media?.ownerId === ownerId ? media : null;
   }
 
+  listStyleReferences(ownerId, taskId) {
+    const task = this.state.data.tasks[taskId];
+    const project = task && this.state.data.projects[task.project_id];
+    if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) return null;
+    return { items: structuredClone(project.style_reference_candidates ?? []),
+      selected_ids: structuredClone(project.creator_plan?.style_reference_ids ?? []) };
+  }
+
+  async addStyleReference(ownerId, taskId, input, idempotencyKey, trends = null, analyzer = analyzeLocalStyleVideo) {
+    const task = this.state.data.tasks[taskId];
+    const project = task && this.state.data.projects[task.project_id];
+    if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '프로젝트를 찾을 수 없습니다.');
+    if (!isValidIdempotencyKey(idempotencyKey) || !input || typeof input !== 'object' || Array.isArray(input) ||
+        Object.keys(input).some((key) => !['kind', 'url', 'media_id', 'topic', 'days', 'video_id', 'note'].includes(key)) ||
+        !['url', 'upload', 'search'].includes(input.kind) || typeof (input.note ?? '') !== 'string' || (input.note ?? '').length > 500)
+      throw apiError(422, 'VALIDATION_ERROR', '참고 영상 입력을 확인해 주세요.');
+    const fingerprint = JSON.stringify(input); const key = `${ownerId}:style-reference:${taskId}:${idempotencyKey}`;
+    const prior = this.state.data.idempotency[key];
+    if (prior) { if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '이미 사용한 요청 키입니다.');
+      if (!(project.style_reference_candidates ?? []).some((item) => item.reference_id === prior.result.reference_id))
+        throw apiError(409, 'INVALID_STATE_TRANSITION', '이미 삭제한 레퍼런스입니다.');
+      return structuredClone(prior.result); }
+    if ((project.style_reference_candidates ?? []).length >= 8) throw apiError(422, 'VALIDATION_ERROR', '참고 영상은 최대 8개까지 등록할 수 있습니다.');
+    let candidate;
+    if (input.kind === 'search') {
+      const cached = trends?.getCached({ topic: input.topic, days: input.days });
+      const item = cached?.items?.find((row) => row.video_id === input.video_id);
+      if (!item) throw apiError(409, 'TREND_CACHE_MISSING', '검색 결과가 만료되었습니다. 다시 검색해 주세요.');
+      candidate = { kind: 'search', platform: 'youtube', url: item.url, metadata: referenceMetadata(item),
+        analysis_scope: 'metadata_only', topic: input.topic, days: input.days };
+    } else if (input.kind === 'url') {
+      const parsed = parseStyleReferenceUrl(input.url);
+      if (!parsed) throw apiError(422, 'VALIDATION_ERROR', '지원하는 HTTPS 쇼츠 URL을 확인해 주세요.');
+      const cached = parsed.platform === 'youtube' ? trends?.getCachedVideo?.(parsed.video_id) : null;
+      const item = cached ?? (parsed.platform === 'youtube' ? await trends?.lookup?.(parsed.video_id) : null);
+      candidate = { kind: 'url', platform: parsed.platform, url: parsed.url,
+        analysis_scope: item ? 'metadata_only' : 'none', metadata: item ? referenceMetadata(item) : null,
+        limitation: item ? '영상 내부 편집은 확인하지 않았습니다.' : '공식 API 접근 정보가 없어 영상 내용과 편집을 분석하지 않았습니다.' };
+    } else {
+      const media = this.getOwnedMedia(ownerId, input.media_id);
+      if (!media || !['video/mp4', 'video/quicktime'].includes(media.mediaType) || media.status !== 'available')
+        throw apiError(404, 'RESOURCE_NOT_FOUND', '선택한 참고 영상을 찾을 수 없습니다.');
+      const path = safeStoragePath(this.blobDir, media.storageKey);
+      if (sha256(readRegularFile(path)) !== media.sha256) throw apiError(409, 'VERSION_CONFLICT', '참고 영상의 무결성을 확인할 수 없습니다.');
+      const analysis = await analyzer(path, resolveMediaToolPaths());
+      candidate = { kind: 'upload', platform: null, media_id: media.mediaId,
+        analysis_scope: 'local_video_sample', analysis };
+    }
+    const result = { ...candidate, reference_id: randomUUID(), note: (input.note ?? '').trim(), created_at: new Date().toISOString() };
+    project.style_reference_candidates ??= [];
+    project.style_reference_candidates.push(result);
+    this.state.data.idempotency[key] = { fingerprint, result }; this.state.save();
+    return structuredClone(result);
+  }
+
+  deleteStyleReference(ownerId, taskId, referenceId) {
+    const task = this.state.data.tasks[taskId];
+    const project = task && this.state.data.projects[task.project_id];
+    if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '프로젝트를 찾을 수 없습니다.');
+    if (project.creator_plan?.style_reference_ids?.includes(referenceId)) throw apiError(409, 'INVALID_STATE_TRANSITION', '기획에 적용한 레퍼런스를 먼저 해제하고 저장해 주세요.');
+    const before = project.style_reference_candidates?.length ?? 0;
+    project.style_reference_candidates = (project.style_reference_candidates ?? []).filter((item) => item.reference_id !== referenceId);
+    if (project.style_reference_candidates.length === before) throw apiError(404, 'RESOURCE_NOT_FOUND', '레퍼런스를 찾을 수 없습니다.');
+    this.state.save(); return { deleted: true };
+  }
+
   createForOwner(ownerId, input, idempotencyKey) {
     const { media_ids: mediaIds, style, target_seconds: targetSeconds = 30, aspect_ratio: aspectRatio = '9:16' } = input ?? {};
     if (!Array.isArray(mediaIds) || mediaIds.length < 1 || mediaIds.length > this.maxSelectedMedia || new Set(mediaIds).size !== mediaIds.length || mediaIds.some((id) => !this.getOwnedMedia(ownerId, id))) {
@@ -434,13 +502,15 @@ export class LocalRepositories {
     if (!task || task.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
     const project = this.state.data.projects[task.project_id];
     if (!project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
-    if (!input || Object.keys(input).some((key) => !['content_version', 'request_text', 'privacy_consent_id'].includes(key)) ||
+    if (!input || Object.keys(input).some((key) => !['content_version', 'request_text', 'privacy_consent_id', 'reference_ids'].includes(key)) ||
         (input.privacy_consent_id !== undefined && !isUuid(input.privacy_consent_id)) ||
+        !validReferenceIds(input.reference_ids, project.style_reference_candidates) ||
         !Number.isSafeInteger(input.content_version) || typeof input.request_text !== 'string' || !input.request_text.trim() || input.request_text.length > 4000) {
       throw apiError(422, 'VALIDATION_ERROR', '현재 콘텐츠 버전과 기획 요청을 확인해 주세요.');
     }
     if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
-    const fingerprint = JSON.stringify({ task_id: taskId, content_version: input.content_version, request_text: input.request_text.trim(), privacy_consent_id: input.privacy_consent_id ?? null });
+    const fingerprint = JSON.stringify({ task_id: taskId, content_version: input.content_version, request_text: input.request_text.trim(),
+      privacy_consent_id: input.privacy_consent_id ?? null, reference_ids: input.reference_ids ?? null });
     const key = `${ownerId}:creator-plan:${idempotencyKey}`;
     const prior = this.state.data.idempotency[key];
     if (prior) {
@@ -499,6 +569,10 @@ export class LocalRepositories {
       for (const checkpoint of Object.values(this.state.data.checkpoints)) if (checkpoint.task_id === taskId && ['pending', 'approved'].includes(checkpoint.status)) checkpoint.status = 'invalidated';
       project.plan_request = input.request_text.trim();
       project.creator_plan = generated.plan;
+      if (input.reference_ids) {
+        project.creator_plan.style_reference_ids = [...input.reference_ids];
+        project.creator_plan.style_references = selectedStyleReferences(project, input.reference_ids);
+      }
       project.caption_draft = generated.captions;
       delete project.video_reuse;
       project.composition ??= { captions_enabled: true, music_track_id: null, source_volume: 1, music_volume: 0.25, fade_in_seconds: 1, fade_out_seconds: 1, source_audio_rights: [] };
@@ -619,15 +693,17 @@ export class LocalRepositories {
     const project = task && this.state.data.projects[task.project_id];
     if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '작업을 찾을 수 없습니다.');
     if (!project.creator_plan || task.active_job_id) throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 기획을 수정할 수 없습니다.');
-    if (!isValidIdempotencyKey(idempotencyKey) || !input || Object.keys(input).some((key) => !['content_version', 'content_hash', 'scenes', 'trend_query'].includes(key)) ||
+    if (!isValidIdempotencyKey(idempotencyKey) || !input || Object.keys(input).some((key) => !['content_version', 'content_hash', 'scenes', 'trend_query', 'reference_ids'].includes(key)) ||
+        !validReferenceIds(input.reference_ids, project.style_reference_candidates) ||
         (input.trend_query !== undefined && input.trend_query !== null &&
           (typeof input.trend_query !== 'object' || Array.isArray(input.trend_query) ||
-            Object.keys(input.trend_query).some((key) => !['topic', 'days'].includes(key)) ||
+            Object.keys(input.trend_query).some((key) => !['topic', 'days', 'video_id'].includes(key)) ||
             !['restaurant', 'cafe', 'travel'].includes(input.trend_query.topic) ||
-            !Number.isInteger(input.trend_query.days) || input.trend_query.days < 1 || input.trend_query.days > 90)) ||
+            !Number.isInteger(input.trend_query.days) || input.trend_query.days < 1 || input.trend_query.days > 90 ||
+            (input.trend_query.video_id !== undefined && !/^[A-Za-z0-9_-]{11}$/.test(input.trend_query.video_id)))) ||
         !Number.isSafeInteger(input.content_version) || typeof input.content_hash !== 'string' || !Array.isArray(input.scenes) ||
         input.scenes.length !== project.media_ids.length || new Set(input.scenes.map((scene) => scene?.media_id)).size !== project.media_ids.length ||
-        input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['media_id', 'duration_seconds', 'trim_start_seconds', 'trim_end_seconds', 'framing', 'motion', 'transition', 'subtitle_style', 'bgm_mood', 'edit_reason'].includes(key)) ||
+        input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['media_id', 'duration_seconds', 'trim_start_seconds', 'trim_end_seconds', 'framing', 'motion', 'transition', 'subtitle_style', 'edit_style', 'bgm_mood', 'edit_reason'].includes(key)) ||
           !validSceneEffects(scene) ||
           !project.media_ids.includes(scene.media_id) || !Number.isFinite(scene.duration_seconds) || scene.duration_seconds < 0.1 ||
           (scene.trim_start_seconds !== undefined && (!['video/mp4', 'video/quicktime'].includes(this.state.data.media[scene.media_id]?.mediaType) ||
@@ -642,7 +718,9 @@ export class LocalRepositories {
     const fingerprint = JSON.stringify(input); const prior = this.state.data.idempotency[key];
     if (prior) { if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '이미 사용한 요청 키입니다.'); return structuredClone(prior.result); }
     if (input.content_version !== task.current_version || input.content_hash !== task.content_hash) throw apiError(409, 'VERSION_CONFLICT', '현재 버전을 다시 확인해 주세요.');
-    const trendReference = input.trend_query ? summarizeTrend(cachedTrend) : null;
+    const selectedTrend = input.trend_query?.video_id ?
+      { ...cachedTrend, items: cachedTrend?.items?.filter((item) => item.video_id === input.trend_query.video_id) ?? [] } : cachedTrend;
+    const trendReference = input.trend_query ? summarizeTrend(selectedTrend) : null;
     if (input.trend_query && (!trendReference || trendReference.topic !== input.trend_query.topic ||
         trendReference.period_days !== input.trend_query.days)) throw apiError(409, 'TREND_CACHE_MISSING', '최근 검색 결과가 만료되었거나 관련성이 낮습니다. 검색 후 다시 확인해 주세요.');
     const previous = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id, scene]));
@@ -652,7 +730,7 @@ export class LocalRepositories {
     const scenes = input.scenes.map((item, index) => {
       const end = index === input.scenes.length - 1 ? project.target_seconds : Math.round((start + item.duration_seconds) * 100) / 100;
       const scene = { ...previous.get(item.media_id), order: index + 1, start_seconds: start, end_seconds: end };
-      for (const field of ['framing', 'motion', 'transition', 'subtitle_style', 'bgm_mood', 'edit_reason']) if (item[field] !== undefined) scene[field] = item[field];
+      for (const field of ['framing', 'motion', 'transition', 'subtitle_style', 'edit_style', 'bgm_mood', 'edit_reason']) if (item[field] !== undefined) scene[field] = item[field];
       if (item.trim_start_seconds !== undefined) scene.trim_start_seconds = item.trim_start_seconds; else delete scene.trim_start_seconds;
       if (item.trim_end_seconds !== undefined) scene.trim_end_seconds = item.trim_end_seconds; else delete scene.trim_end_seconds;
       start = end; return scene;
@@ -667,6 +745,10 @@ export class LocalRepositories {
     project.creator_plan.recommended_media_order = [...project.media_ids];
     if (input.trend_query === null) delete project.creator_plan.trend_reference;
     else if (trendReference) project.creator_plan.trend_reference = trendReference;
+    if (input.reference_ids) {
+      project.creator_plan.style_reference_ids = [...input.reference_ids];
+      project.creator_plan.style_references = selectedStyleReferences(project, input.reference_ids);
+    }
     project.caption_draft = scenes.flatMap((scene) => {
       const original = previous.get(scene.media_id);
       return (captions.get(scene.media_id) ?? []).map((caption) => ({
@@ -698,6 +780,71 @@ export class LocalRepositories {
       .filter((project) => project.ownerId === ownerId)
       .map((project) => publicProject(project))
       .reverse();
+  }
+
+  deleteOwnedProject(ownerId, projectId, input, idempotencyKey) {
+    if (!isValidIdempotencyKey(idempotencyKey)) throw apiError(422, 'VALIDATION_ERROR', 'Idempotency-Key가 필요합니다.');
+    const receiptKey = `${ownerId}:project-delete:${idempotencyKey}`;
+    const prior = this.state.data.idempotency[receiptKey];
+    if (prior) {
+      if (prior.projectId !== projectId || prior.contentVersion !== input?.content_version || prior.contentHash !== input?.content_hash) {
+        throw apiError(409, 'IDEMPOTENCY_CONFLICT', '멱등 키가 다른 요청에 사용되었습니다.');
+      }
+      return structuredClone(prior.result);
+    }
+    const project = this.state.data.projects[projectId];
+    if (!project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '프로젝트를 찾을 수 없습니다.');
+    if (!input || Object.keys(input).some((key) => !['content_version', 'content_hash'].includes(key)) ||
+        !Number.isSafeInteger(input.content_version) || input.content_version < 1 || !/^[a-f0-9]{64}$/i.test(input.content_hash ?? '')) {
+      throw apiError(422, 'VALIDATION_ERROR', '현재 프로젝트 버전과 해시를 확인해 주세요.');
+    }
+    if (project.current_version !== input.content_version || project.content_hash !== input.content_hash) {
+      throw apiError(409, 'VERSION_CONFLICT', '프로젝트가 변경되었습니다. 목록을 새로고침해 주세요.');
+    }
+    const taskId = project.task_id;
+    const task = this.state.data.tasks[taskId];
+    if (!task || task.project_id !== projectId || task.ownerId !== ownerId) throw apiError(409, 'INVALID_STATE_TRANSITION', '프로젝트의 작업 연결을 확인할 수 없습니다.');
+    const jobs = Object.values(this.state.data.jobs).filter((item) => item.task_id === taskId);
+    if (task.active_job_id || jobs.some((item) => ['queued', 'running', 'processing'].includes(item.status))) {
+      throw apiError(409, 'RENDER_IN_PROGRESS', '진행 중인 렌더 작업을 취소하거나 완료한 후 삭제해 주세요.');
+    }
+    const linked = {
+      checkpoints: Object.values(this.state.data.checkpoints).filter((item) => item.task_id === taskId),
+      approvals: Object.values(this.state.data.approvals).filter((item) => item.task_id === taskId),
+      publications: Object.values(this.state.data.publications).filter((item) => item.task_id === taskId),
+      jobs,
+    };
+    if (Object.entries(linked).some(([kind, records]) => records.some((item) => {
+      const explicitOwner = item.owner_id ?? item.ownerId;
+      // Legacy approvals are scoped by the already verified owned task, without an owner field.
+      return explicitOwner === undefined ? kind !== 'approvals' : explicitOwner !== ownerId;
+    }))) {
+      throw apiError(409, 'INVALID_STATE_TRANSITION', '연결된 기록의 소유권을 확인할 수 없습니다.');
+    }
+    const linkedIds = Object.fromEntries(Object.entries({ checkpoints: 'checkpoint_id', approvals: 'approval_id', publications: 'publication_id', jobs: 'job_id' })
+      .map(([kind, field]) => [kind, linked[kind].map((item) => item[field])]));
+    const ids = new Set([projectId, taskId, ...Object.values(linkedIds).flat()]);
+    const before = structuredClone(this.state.data);
+    try {
+      for (const [key, value] of Object.entries(this.state.data.idempotency)) {
+        if (ids.has(value?.projectId) || ids.has(value?.taskId) || ids.has(value?.checkpointId) || ids.has(value?.approvalId) ||
+            ids.has(value?.publicationId) || ids.has(value?.jobId) || [...ids].some((id) => key.includes(id) || JSON.stringify(value).includes(id))) {
+          delete this.state.data.idempotency[key];
+        }
+      }
+      for (const [kind, recordIds] of Object.entries(linkedIds)) {
+        for (const id of recordIds) delete this.state.data[kind][id];
+      }
+      delete this.state.data.tasks[taskId];
+      delete this.state.data.projects[projectId];
+      const result = { project_id: projectId, deleted: true, media_preserved: true, render_files_preserved: true };
+      this.state.data.idempotency[receiptKey] = { projectId, contentVersion: input.content_version, contentHash: input.content_hash, result };
+      this.state.save();
+      return structuredClone(result);
+    } catch (error) {
+      this.state.data = before;
+      throw error;
+    }
   }
 
   async getOwnedTask(ownerId, taskId) {
@@ -1154,6 +1301,21 @@ function publicProject(project) {
   if (project.style !== undefined) result.style = project.style;
   if (project.media_manifest) result.media_manifest = structuredClone(project.media_manifest);
   return result;
+}
+
+function referenceMetadata(item) {
+  return { title: item.title ?? '', description: item.description ?? '', published_at: item.published_at ?? null,
+    view_count: item.view_count ?? null, like_count: item.like_count ?? null, duration_seconds: item.duration_seconds ?? null,
+    shorts_status: 'unconfirmed' };
+}
+
+function validReferenceIds(ids, candidates) {
+  return ids === undefined || (Array.isArray(ids) && ids.length <= 8 && new Set(ids).size === ids.length &&
+    ids.every((id) => typeof id === 'string' && (candidates ?? []).some((candidate) => candidate.reference_id === id)));
+}
+
+function selectedStyleReferences(project, ids) {
+  return ids.map((id) => structuredClone(project.style_reference_candidates.find((candidate) => candidate.reference_id === id)));
 }
 
 function publicationInput(input) {

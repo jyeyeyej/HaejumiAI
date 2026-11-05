@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { publicationDraftsFromPlan } from '../../shared/publication-drafts.js';
-import { proposeMixedEdit, summarizeTrend } from '../../shared/trend-edit.js';
+import { proposeBasicEdit, proposeMixedEdit, hasVisibleEditDifference, summarizeTrend } from '../../shared/trend-edit.js';
 
 test('caption editor keeps full-width multiline text and paired times with compact actions', () => {
   const jsx = readFileSync(new URL('../src/ui/CreatorWorkspace.jsx', import.meta.url), 'utf8');
@@ -26,9 +26,11 @@ test('trend edit controls show separate evidence and local recommendations with 
   const jsx = readFileSync(new URL('../src/ui/CreatorWorkspace.jsx', import.meta.url), 'utf8');
   assert.match(jsx, /검색에서 확인된 사실/);
   assert.match(jsx, /해주미의 장면 효과는 Vision 분류를 바탕으로 한 자체 추천/);
-  assert.match(jsx, /장면별 자동 혼합 편집 제안/);
-  assert.match(jsx, /현재 기획의 기본 편집으로 되돌리기/);
+  assert.match(jsx, /트렌드 혼합 편집 적용/);
+  assert.match(jsx, /기본 효과 적용/);
+  assert.match(jsx, /아직 영상에 반영되지 않았습니다/);
+  assert.match(jsx, /렌더 적용: 화면 배치·움직임·전환·색감/);
   const plan = { target_seconds: 6, scenes: [{ media_id: 'synthetic', media_type: 'image/jpeg', start_seconds: 0, end_seconds: 6 }] };
   assert.equal(summarizeTrend({ status: 'unavailable', reason: 'API_LIMITED' }), null);
-  assert.equal(proposeMixedEdit(plan, { source: 'local_rules' })[0].motion, 'static');
+  assert.equal(hasVisibleEditDifference(proposeBasicEdit(plan), proposeMixedEdit(plan, { source: 'local_rules' })), false);
 });

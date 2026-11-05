@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { JsonState } from '../src/adapters/filesystem/json-state.js';
 import { LocalRepositories } from '../src/adapters/filesystem/repositories.js';
 import { createApiHandler } from '../src/adapters/node-http/transport.js';
-import { makeJpegStructure, makeMp4Structure } from './media-fixtures.js';
+import { makeJpegStructure, makeMp4Structure, makePng, makeWebpStructure } from './media-fixtures.js';
 import { HaejumiApi } from '../../web/src/api.js';
 
 function paddedJpeg(size) {
@@ -88,4 +88,47 @@ test('PC web retry reuses accepted parts and reports a numbered bad JPEG without
   await assert.rejects(() => api.uploadMany(bad, { keys: { initKey: randomUUID(), completeKey: randomUUID() } }),
     (error) => error.status === 422 && error.itemIndex === 2 && error.field === 'file_structure');
   assert.equal(Object.keys(repositories.state.data.media).length, 3);
+});
+
+test('PC web independent sessions keep seven valid uploads after three invalid files and create an ordered project after retry', async (t) => {
+  const { api, repositories } = await setup(t);
+  const selected = Array.from({ length: 10 }, (_, index) => item([1, 4, 8].includes(index)
+    ? Buffer.from([0xff, 0xd8, 1, 2, 3]) : paddedJpeg(4096), index + 1));
+  const updates = [];
+  const first = await api.uploadEach(selected, { onItem: (index, update) => updates.push({ index, ...update }) });
+  assert.equal(first.results.length, 10);
+  assert.equal(first.results.filter((result) => result.mediaId).length, 7);
+  assert.deepEqual(updates.filter((update) => update.status === '실패').map((update) => update.index), [1, 4, 8]);
+  assert.equal(Object.keys(repositories.state.data.media).length, 7);
+  const repaired = selected.map((entry, index) => first.results[index].mediaId ? entry : item(paddedJpeg(4096), index + 1));
+  const retryIndexes = first.results.map((result, index) => result.mediaId ? null : index).filter((index) => index !== null);
+  const retry = await api.uploadEach(retryIndexes.map((index) => repaired[index]));
+  assert.equal(retry.results.filter((result) => result.mediaId).length, 3);
+  assert.equal(Object.keys(repositories.state.data.media).length, 10);
+  const ordered = first.results.map((result, index) => result.mediaId ?? retry.results[retryIndexes.indexOf(index)].mediaId);
+  const project = await api.createProject(ordered);
+  assert.deepEqual(project.media_ids, ordered);
+  assert.deepEqual(repositories.state.data.projects[project.project_id].media_ids, ordered);
+});
+
+test('independent upload accepts five JPEG orientations plus PNG, WebP and MP4, and reports a safe JPEG structure field', async (t) => {
+  const { api, repositories } = await setup(t);
+  const jpeg = (width, height) => {
+    const bytes = Buffer.from(makeJpegStructure());
+    bytes.writeUInt16BE(height, 7); bytes.writeUInt16BE(width, 9);
+    return bytes;
+  };
+  const selected = [jpeg(1600, 900), jpeg(900, 1600), jpeg(1200, 1200), jpeg(1920, 1080), jpeg(1080, 1920)]
+    .map((bytes, index) => item(bytes, index + 1));
+  selected.push({ file: new File([makePng()], 'synthetic.png', { type: 'image/png' }), keys: { itemId: randomUUID(), partKey: randomUUID() } });
+  selected.push({ file: new File([makeWebpStructure()], 'synthetic.webp', { type: 'image/webp' }), keys: { itemId: randomUUID(), partKey: randomUUID() } });
+  selected.push(item(makeMp4Structure(), 7, 'video/mp4'));
+  const outcome = await api.uploadEach(selected);
+  assert.equal(outcome.results.filter((result) => result.mediaId).length, 8);
+  assert.equal((await api.createProject(outcome.results.map((result) => result.mediaId))).media_ids.length, 8);
+  assert.equal(Object.keys(repositories.state.data.media).length, 8);
+  const damaged = item(Buffer.from([0xff, 0xd8, 1, 2, 3]), 8);
+  await assert.rejects(() => api.upload(damaged.file, { keys: damaged.keys }),
+    (error) => error.status === 422 && error.code === 'VALIDATION_ERROR' && error.field === 'file_structure' &&
+      /내부 구조/.test(error.message));
 });

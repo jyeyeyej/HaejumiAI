@@ -67,23 +67,29 @@ function makeRuleBasedPlan(project, media, requestText) {
 }
 
 function normalizeVisionOutput(output, project, media, requestText) {
-  if (!output?.plan || !Array.isArray(output.plan.scenes) || output.plan.scenes.length !== media.length ||
+  if (!output?.plan || !Array.isArray(output.plan.scenes) ||
       (output.captions !== undefined && !Array.isArray(output.captions))) return null;
   const rawCaptions = output.captions ?? [];
   if (rawCaptions.length > 30) return null;
-  // Untrusted subtitle rows are discarded; only separate, verified scene caption fields can replace them.
-  const safeRawCaptions = rawCaptions.filter((caption) => validCaptionText(caption?.text, requestText));
   const base = makeRuleBasedPlan(project, media, requestText).plan;
-  const byId = new Map(output.plan.scenes.map((scene) => [scene?.media_id, scene]));
-  if (byId.size !== media.length || media.some((item) => !byId.has(item.mediaId))) return null;
-  const rawScenes = media.map((item) => byId.get(item.mediaId));
-  const useTimes = rawScenes.every((scene, index) => Number.isFinite(scene.start_seconds) && Number.isFinite(scene.end_seconds) &&
+  const selectedIds = new Set(media.map((item) => item.mediaId));
+  const sampledIds = new Set(media.filter((item) => item.imageDataUrl).map((item) => item.mediaId));
+  const byId = new Map();
+  for (const scene of output.plan.scenes) {
+    if (!scene || !selectedIds.has(scene.media_id) || byId.has(scene.media_id)) return null;
+    byId.set(scene.media_id, scene);
+  }
+  if (!byId.size) return null;
+  // An unsampled item must still appear in the project, but its visual details cannot be inferred.
+  const rawScenes = media.map((item) => byId.get(item.mediaId) ?? null);
+  const useTimes = rawScenes.every((scene, index) => scene && Number.isFinite(scene.start_seconds) && Number.isFinite(scene.end_seconds) &&
     scene.start_seconds < scene.end_seconds && scene.start_seconds >= 0 && scene.end_seconds <= project.target_seconds &&
     Math.abs(scene.start_seconds - (index ? rawScenes[index - 1].end_seconds : 0)) <= 0.01) &&
     Math.abs(rawScenes.at(-1).end_seconds - project.target_seconds) <= 0.01;
   const scenes = base.scenes.map((fallback, index) => {
     const raw = rawScenes[index];
     const scene = { ...fallback, ...(useTimes ? { start_seconds: raw.start_seconds, end_seconds: raw.end_seconds } : {}) };
+    if (!raw || !sampledIds.has(fallback.media_id)) return scene;
     if (typeof raw.visual_direction === 'string' && raw.visual_direction.length <= 500) scene.visual_direction = raw.visual_direction;
     for (const field of ['framing', 'motion', 'transition', 'subtitle_style', 'bgm_mood', 'edit_reason']) {
       if (raw[field] !== undefined && validSceneEffects({ ...scene, [field]: raw[field] })) scene[field] = raw[field];
@@ -94,7 +100,7 @@ function normalizeVisionOutput(output, project, media, requestText) {
   const insightById = new Map((Array.isArray(output.plan.media_insights) ? output.plan.media_insights : []).map((item) => [item?.media_id, item]));
   const mediaInsights = base.media_insights.map((fallback) => {
     const raw = insightById.get(fallback.media_id);
-    if (!raw) return fallback;
+    if (!raw || !sampledIds.has(fallback.media_id)) return fallback;
     return { ...fallback,
       ...Object.fromEntries(['description', 'mood', 'usable_detail', 'uncertainty'].filter((field) => typeof raw[field] === 'string' && raw[field].length <= 500).map((field) => [field, raw[field]])),
       category: ['food', 'cafe', 'travel', 'other', 'unknown'].includes(raw.category) ? raw.category : fallback.category,
@@ -108,27 +114,40 @@ function normalizeVisionOutput(output, project, media, requestText) {
     if (typeof output.plan[field] === 'string' && output.plan[field].trim() && output.plan[field].length <= max) plan[field] = output.plan[field];
   }
   if (Array.isArray(output.plan.recommended_media_order) && output.plan.recommended_media_order.length === media.length &&
-      new Set(output.plan.recommended_media_order).size === media.length && output.plan.recommended_media_order.every((id) => byId.has(id))) {
+      new Set(output.plan.recommended_media_order).size === media.length && output.plan.recommended_media_order.every((id) => selectedIds.has(id))) {
     plan.recommended_media_order = output.plan.recommended_media_order;
   }
-  let captions = safeRawCaptions.filter((caption) => caption && Number.isFinite(caption.start_seconds) && Number.isFinite(caption.end_seconds) &&
-    captionScene(caption, scenes) && validCaption(caption.text, caption.end_seconds - caption.start_seconds, requestText))
-    .sort((a, b) => a.start_seconds - b.start_seconds);
-  if (captions.some((caption, index) => index && caption.start_seconds < captions[index - 1].end_seconds - 0.001)) captions = [];
+  const captions = [];
+  for (const raw of rawCaptions) {
+    if (!validCaptionText(raw?.text, requestText) || !Number.isFinite(raw.start_seconds) || !Number.isFinite(raw.end_seconds) ||
+        raw.start_seconds >= raw.end_seconds) continue;
+    const source = rawScenes.find((scene) => scene && sampledIds.has(scene.media_id) &&
+      raw.start_seconds >= scene.start_seconds - 0.001 && raw.end_seconds <= scene.end_seconds + 0.001);
+    if (!source) continue;
+    const target = scenes.find((scene) => scene.media_id === source.media_id);
+    const ratio = (target.end_seconds - target.start_seconds) / (source.end_seconds - source.start_seconds);
+    const caption = { start_seconds: roundTime(target.start_seconds + (raw.start_seconds - source.start_seconds) * ratio),
+      end_seconds: roundTime(target.start_seconds + (raw.end_seconds - source.start_seconds) * ratio), text: raw.text };
+    if (captionScene(caption, scenes) && validCaption(caption.text, caption.end_seconds - caption.start_seconds, requestText)) captions.push(caption);
+  }
+  captions.sort((a, b) => a.start_seconds - b.start_seconds);
+  for (let index = captions.length - 1; index > 0; index--) {
+    if (captions[index].start_seconds < captions[index - 1].end_seconds - 0.001) captions.splice(index, 1);
+  }
   if (captions.length === 0) {
     for (const scene of scenes) {
-      if (!scene.caption_text) continue;
+      if (!scene.caption_text || !sampledIds.has(scene.media_id)) continue;
       const end = Math.min(scene.end_seconds, roundTime(scene.start_seconds + 3.5));
       if (end > scene.start_seconds && validCaption(scene.caption_text, end - scene.start_seconds, requestText)) {
         captions.push({ start_seconds: scene.start_seconds, end_seconds: end, text: scene.caption_text });
       }
     }
   }
-  captions = captions.sort((a, b) => a.start_seconds - b.start_seconds).slice(0, 30).map((caption, index) => ({
+  const orderedCaptions = captions.sort((a, b) => a.start_seconds - b.start_seconds).slice(0, 30).map((caption, index) => ({
     order: index + 1, start_seconds: caption.start_seconds, end_seconds: caption.end_seconds, text: caption.text }));
-  if (!captions.length) return null;
+  if (!orderedCaptions.length) return null;
   plan.publication_suggestions = publicationDraftsFromPlan(plan, { source: 'gateway' });
-  return { plan, captions };
+  return { plan, captions: orderedCaptions };
 }
 
 function validPlan(value, project, media, requestText) {

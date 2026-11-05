@@ -2,6 +2,7 @@ import { PRIVACY_NOTICE_ID, PRIVACY_NOTICE_VERSION } from '../filesystem/reposit
 import { PersonalRecords } from '../filesystem/personal-records.js';
 import { LocalAssistant } from '../../agents/local-assistant.js';
 import { LocalBackups } from '../filesystem/local-backups.js';
+import { parseStyleReferenceUrl } from '../../media-engine/style-reference.js';
 
 const API_PREFIX = '/api/v1';
 const JSON_LIMIT = 1_048_576;
@@ -16,6 +17,14 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
   const personal = new PersonalRecords(repositories.state);
   const localAssistant = new LocalAssistant(repositories.state, personal);
   const localBackups = repositories.dataDir ? new LocalBackups(repositories.dataDir) : null;
+  const reserveTrendRequest = () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const usage = repositories.state.data.trendSearchUsage ?? { day: today, count: 0 };
+    if (usage.day !== today) { usage.day = today; usage.count = 0; }
+    if (usage.count >= 10) return false;
+    usage.count += 1; repositories.state.data.trendSearchUsage = usage; repositories.state.save();
+    return true;
+  };
   return async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
@@ -52,13 +61,34 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
         const topic = url.searchParams.get('topic'); const days = Number(url.searchParams.get('days') ?? 30);
         if (!['restaurant', 'cafe', 'travel'].includes(topic) || !Number.isInteger(days) || days < 1 || days > 90) return sendError(response, 422, 'VALIDATION_ERROR');
         if (trends.enabled && !trends.getCached({ topic, days })) {
-          const today = new Date().toISOString().slice(0, 10);
-          const usage = repositories.state.data.trendSearchUsage ?? { day: today, count: 0 };
-          if (usage.day !== today) { usage.day = today; usage.count = 0; }
-          if (usage.count >= 10) return sendError(response, 429, 'RATE_LIMITED');
-          usage.count += 1; repositories.state.data.trendSearchUsage = usage; repositories.state.save();
+          if (!reserveTrendRequest()) return sendError(response, 429, 'RATE_LIMITED');
         }
         return sendJson(response, 200, await trends.search({ topic, days }));
+      }
+
+      let styleMatch = /^\/tasks\/([0-9a-f-]+)\/style-references$/.exec(path);
+      if (styleMatch && request.method === 'GET') {
+        const result = repositories.listStyleReferences(principal.ownerId, styleMatch[1]);
+        return result ? sendJson(response, 200, result) : sendError(response, 404, 'RESOURCE_NOT_FOUND');
+      }
+      if (styleMatch && request.method === 'POST') {
+        requireJson(request); requireIdempotencyKey(request);
+        const body = await readJson(request);
+        if (!repositories.listStyleReferences(principal.ownerId, styleMatch[1])) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        const parsed = body?.kind === 'url' ? parseStyleReferenceUrl(body.url) : null;
+        if (body?.kind === 'url' && !parsed) return sendError(response, 422, 'VALIDATION_ERROR');
+        if (parsed?.platform === 'youtube' && trends?.enabled && !trends.getCachedVideo?.(parsed.video_id) &&
+            !repositories.state.data.idempotency[`${principal.ownerId}:style-reference:${styleMatch[1]}:${request.headers['idempotency-key']}`] &&
+            !reserveTrendRequest()) return sendError(response, 429, 'RATE_LIMITED');
+        return sendJson(response, 201, await repositories.addStyleReference(principal.ownerId, styleMatch[1], body,
+          request.headers['idempotency-key'], trends));
+      }
+      styleMatch = /^\/tasks\/([0-9a-f-]+)\/style-references\/([0-9a-f-]+)$/.exec(path);
+      if (styleMatch && request.method === 'DELETE') {
+        requireIdempotencyKey(request);
+        return sendJson(response, 200, await repositories.withIdempotentResponse(principal.ownerId, 'style-reference-delete',
+          request.headers['idempotency-key'], `${styleMatch[1]}:${styleMatch[2]}`,
+          () => repositories.deleteStyleReference(principal.ownerId, styleMatch[1], styleMatch[2])));
       }
 
       if (path === '/backups' && request.method === 'POST') {
@@ -360,6 +390,12 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
         const body = await readJson(request);
         const result = repositories.createForOwner(principal.ownerId, body, request.headers['idempotency-key']);
         return sendJson(response, 201, result);
+      }
+      match = /^\/content\/projects\/([0-9a-f-]+)$/.exec(path);
+      if (request.method === 'DELETE' && match) {
+        requireJson(request); requireIdempotencyKey(request);
+        const body = await readJson(request);
+        return sendJson(response, 200, repositories.deleteOwnedProject(principal.ownerId, match[1], body, request.headers['idempotency-key']));
       }
 
       match = /^\/tasks\/([0-9a-f-]+)\/plan$/.exec(path);

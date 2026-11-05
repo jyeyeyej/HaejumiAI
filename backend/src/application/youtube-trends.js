@@ -16,6 +16,33 @@ export class YouTubeTrends {
     return structuredClone(entry.result);
   }
 
+  getCachedVideo(videoId) {
+    const lookup = this.cache.get(`video:${videoId}`);
+    if (lookup?.expiresAt > this.now().getTime()) return structuredClone(lookup.result);
+    for (const entry of this.cache.values()) {
+      if (entry.expiresAt > this.now().getTime()) {
+        const match = entry.result?.items?.find((item) => item.video_id === videoId);
+        if (match) return structuredClone(match);
+      }
+    }
+    return null;
+  }
+
+  async lookup(videoId) {
+    if (!VIDEO_ID.test(videoId)) throw new Error('INVALID_VIDEO_ID');
+    const cached = this.getCachedVideo(videoId);
+    if (cached) return cached;
+    if (!this.enabled) return null;
+    try {
+      const response = await this.get('videos', { part: 'snippet,statistics,contentDetails', id: videoId });
+      const item = response.items?.find((row) => row.id === videoId);
+      if (!item) return null;
+      const result = videoMetadata(item);
+      this.cache.set(`video:${videoId}`, { expiresAt: this.now().getTime() + this.cacheTtlMs, result });
+      return structuredClone(result);
+    } catch { return null; }
+  }
+
   async search({ topic, days = 30 }) {
     if (!Object.hasOwn(TOPICS, topic) || !Number.isInteger(days) || days < 1 || days > 90) throw new Error('INVALID_TREND_QUERY');
     const period = { from: new Date(this.now().getTime() - days * 86400000).toISOString(), to: this.now().toISOString() };
@@ -30,11 +57,7 @@ export class YouTubeTrends {
       if (!ids.length) return this.remember(topic, days, { status: 'ok', source: 'youtube_data_api', topic, period, analysis_scope: 'metadata_only', items: [] });
       const details = await this.get('videos', { part: 'snippet,statistics,contentDetails', id: ids.join(',') });
       const items = (details.items ?? []).filter((item) => VIDEO_ID.test(item.id) && shortSeconds(item.contentDetails?.duration) <= 59)
-        .map((item) => ({ video_id: item.id, url: `https://www.youtube.com/watch?v=${item.id}`, title: safeText(item.snippet?.title, 200),
-          description: safeText(item.snippet?.description, 500),
-          published_at: item.snippet?.publishedAt ?? null, view_count: safeCount(item.statistics?.viewCount),
-          like_count: safeCount(item.statistics?.likeCount), comment_count: safeCount(item.statistics?.commentCount),
-          duration_seconds: shortSeconds(item.contentDetails?.duration), analysis_scope: 'metadata_only' }));
+        .map(videoMetadata).slice(0, 10);
       return this.remember(topic, days, { status: 'ok', source: 'youtube_data_api', topic, period, analysis_scope: 'metadata_only', items });
     } catch (error) {
       return { status: 'unavailable', reason: error?.code === 'API_LIMITED' ? 'API_LIMITED' : 'API_UNAVAILABLE',
@@ -69,3 +92,10 @@ function shortSeconds(value) {
 }
 function safeCount(value) { return /^\d+$/.test(String(value ?? '')) ? Number(value) : null; }
 function safeText(value, max) { return typeof value === 'string' ? value.slice(0, max) : ''; }
+function videoMetadata(item) {
+  return { video_id: item.id, url: `https://www.youtube.com/watch?v=${item.id}`, title: safeText(item.snippet?.title, 200),
+    description: safeText(item.snippet?.description, 500), published_at: item.snippet?.publishedAt ?? null,
+    view_count: safeCount(item.statistics?.viewCount), like_count: safeCount(item.statistics?.likeCount),
+    comment_count: safeCount(item.statistics?.commentCount), duration_seconds: shortSeconds(item.contentDetails?.duration),
+    shorts_status: 'unconfirmed', analysis_scope: 'metadata_only' };
+}

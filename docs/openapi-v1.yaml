@@ -382,6 +382,76 @@ paths:
         '422': { $ref: '#/components/responses/ValidationError' }
         '429': { $ref: '#/components/responses/Error' }
         default: { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/style-references:
+    get:
+      tags: [Tasks]
+      operationId: listCreatorStyleReferences
+      summary: List owned style reference candidates and currently selected IDs
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Stored candidates; an unselected candidate does not change the content version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, selected_ids]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/StyleReference' } }
+                  selected_ids: { type: array, items: { type: string, format: uuid } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Tasks]
+      operationId: addCreatorStyleReference
+      summary: Register an explicit search result, supported URL, or owned uploaded video
+      description: Search selection uses only a fresh server cache. A YouTube URL may request official videos.list metadata only when live search is enabled and within the shared ten-request daily limit. Instagram and TikTok URLs are recorded without fetching media. An uploaded video is probed locally and sampled at 2fps for approximate screen-change times. No reference image or audio is copied to the output.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [search, url, upload] }
+                topic: { type: string, enum: [restaurant, cafe, travel] }
+                days: { type: integer, minimum: 1, maximum: 90 }
+                video_id: { type: string, pattern: '^[A-Za-z0-9_-]{11}$' }
+                url: { type: string, maxLength: 500, format: uri }
+                media_id: { type: string, format: uuid }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Candidate recorded without changing the approved content
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StyleReference' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/Error' }
+  /tasks/{task_id}/style-references/{reference_id}:
+    delete:
+      tags: [Tasks]
+      operationId: deleteCreatorStyleReference
+      summary: Delete an unselected owned reference candidate
+      description: A reference selected by the current plan must first be deselected in a versioned scene edit.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - { name: reference_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /capabilities:
     get:
       tags: [Capabilities]
@@ -857,6 +927,43 @@ paths:
               schema: { $ref: '#/components/schemas/ContentProject' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Projects]
+      operationId: deleteContentProject
+      summary: Delete an owned Creator project and its linked server records
+      description: Requires the current version and hash. Active render jobs block deletion. Shared uploaded media and render files remain on local disk; project, task, checkpoint, approval, publication, job and related idempotency records are removed. LLM budget, privacy consent and other Agent data remain unchanged.
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content_version, content_hash]
+              properties:
+                content_version: { type: integer, minimum: 1 }
+                content_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+      responses:
+        '200':
+          description: Deleted project receipt; repeating the same idempotency key returns this receipt
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project_id, deleted, media_preserved, render_files_preserved]
+                properties:
+                  project_id: { type: string, format: uuid }
+                  deleted: { type: boolean }
+                  media_preserved: { type: boolean }
+                  render_files_preserved: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
   /content/projects/{project_id}/rights:
     get:
@@ -1865,6 +1972,7 @@ components:
         content_version: { type: integer, minimum: 1, description: Current task version used as the concurrency precondition; stale versions on new requests are rejected with 409. An identical idempotent replay returns its recorded result. }
         request_text: { type: string, minLength: 1, maxLength: 4000 }
         privacy_consent_id: { type: string, format: uuid, description: Optional owner-bound consent for OpenAI vision analysis. }
+        reference_ids: { type: array, maxItems: 8, uniqueItems: true, description: Owned reference candidates to record in the new plan. They are not sent to the external LLM or automatically copied into the output., items: { type: string, format: uuid } }
     CreatorSceneEditRequest:
       type: object
       additionalProperties: false
@@ -1880,6 +1988,8 @@ components:
           properties:
             topic: { type: string, enum: [restaurant, cafe, travel] }
             days: { type: integer, minimum: 1, maximum: 90 }
+            video_id: { type: string, pattern: '^[A-Za-z0-9_-]{11}$', description: Optional selected result from that cache entry. }
+        reference_ids: { type: array, maxItems: 8, uniqueItems: true, description: Selected owned candidate IDs in priority order; changing this list increments content_version and invalidates approvals., items: { type: string, format: uuid } }
         scenes:
           type: array
           minItems: 1
@@ -1897,6 +2007,7 @@ components:
               motion: { type: string, enum: [static, zoom_in, zoom_out, pan_left, pan_right] }
               transition: { type: string, enum: [cut, fade] }
               subtitle_style: { type: string, enum: [default, emphasis, information] }
+              edit_style: { type: string, enum: [basic, travel_warm, food_pop, cafe_soft, information], description: Optional local FFmpeg color grade and motion strength; source search metadata alone does not prove an editing technique. }
               bgm_mood: { type: string, maxLength: 100 }
               edit_reason: { type: string, maxLength: 500 }
     CreatorPlanResult:
@@ -1922,6 +2033,8 @@ components:
         mood: { type: string, maxLength: 500 }
         ending_line: { type: string, maxLength: 500 }
         recommended_media_order: { type: array, description: Suggested order only; actual order changes require a versioned scene edit and new approval., items: { type: string, format: uuid } }
+        style_reference_ids: { type: array, maxItems: 8, items: { type: string, format: uuid } }
+        style_references: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/StyleReference' } }
         trend_reference:
           type: object
           description: Optional source evidence from cached YouTube titles/descriptions and public metrics. No reference video effects were inspected.
@@ -1994,8 +2107,49 @@ components:
               motion: { type: string, enum: [static, zoom_in, zoom_out, pan_left, pan_right] }
               transition: { type: string, enum: [cut, fade] }
               subtitle_style: { type: string, enum: [default, emphasis, information] }
+              edit_style: { type: string, enum: [basic, travel_warm, food_pop, cafe_soft, information] }
               bgm_mood: { type: string, maxLength: 100 }
               edit_reason: { type: string, maxLength: 500 }
+    StyleReference:
+      type: object
+      additionalProperties: false
+      required: [reference_id, kind, analysis_scope, note, created_at]
+      properties:
+        reference_id: { type: string, format: uuid }
+        kind: { type: string, enum: [search, url, upload] }
+        platform: { type: [string, 'null'], enum: [youtube, instagram, tiktok, null] }
+        url: { type: string, format: uri }
+        media_id: { type: string, format: uuid }
+        topic: { type: string, enum: [restaurant, cafe, travel] }
+        days: { type: integer, minimum: 1, maximum: 90 }
+        analysis_scope: { type: string, enum: [metadata_only, local_video_sample, none] }
+        limitation: { type: string }
+        note: { type: string, maxLength: 500 }
+        created_at: { type: string, format: date-time }
+        metadata:
+          type: [object, 'null']
+          properties:
+            title: { type: string }
+            description: { type: string }
+            published_at: { type: [string, 'null'], format: date-time }
+            view_count: { type: [integer, 'null'] }
+            like_count: { type: [integer, 'null'] }
+            duration_seconds: { type: [number, 'null'] }
+            shorts_status: { type: string, const: unconfirmed }
+        analysis:
+          type: object
+          description: Local FFprobe and sampled FFmpeg observations only, not a semantic or copyright analysis.
+          properties:
+            duration_seconds: { type: number }
+            width: { type: integer }
+            height: { type: integer }
+            aspect_ratio: { type: number }
+            analyzed_seconds: { type: number }
+            cut_times_seconds: { type: array, items: { type: number } }
+            average_cut_seconds: { type: [number, 'null'] }
+            cut_detection: { type: string, enum: [sampled_scene_threshold, unavailable] }
+            pace: { type: string, enum: [fast, medium, slow, unknown] }
+            limitations: { type: array, items: { type: string } }
     TrendSearchResult:
       type: object
       required: [status, source, topic, period, analysis_scope, items]
@@ -2026,6 +2180,7 @@ components:
               like_count: { type: [integer, 'null'] }
               comment_count: { type: [integer, 'null'] }
               duration_seconds: { type: integer }
+              shorts_status: { type: string, const: unconfirmed }
               analysis_scope: { type: string, const: metadata_only }
     CreatorDraft:
       type: object

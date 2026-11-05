@@ -27,6 +27,7 @@ export function App() {
   const [connectionState, setConnectionState] = useState('checking');
   const [textConsentId, setTextConsentId] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState(null);
 
   const reload = useCallback(async (active = api) => {
     if (!active) return;
@@ -81,6 +82,23 @@ export function App() {
     finally { setBusy(false); }
   }
 
+  async function deleteProject(project) {
+    if (!api || deletingProjectId || !window.confirm('이 쇼츠 프로젝트를 목록에서 삭제하시겠습니까? 연결된 작업·승인 기록은 삭제되고 원본 미디어와 렌더 파일은 보존됩니다.')) return;
+    setDeletingProjectId(project.project_id);
+    try {
+      await api.deleteProject(project.project_id, project.current_version, project.content_hash);
+      if (selected?.project_id === project.project_id) setSelected(null);
+      await reload();
+      setStatus('프로젝트를 삭제했습니다. 원본 미디어와 렌더 파일은 보존했습니다.');
+    } catch (error) {
+      await reload().catch(() => {});
+      setStatus(error.code === 'RENDER_IN_PROGRESS' ? error.message
+        : error.code === 'VERSION_CONFLICT' ? '프로젝트 버전이 변경됐습니다. 갱신된 목록에서 다시 확인해 주세요.'
+          : error.code === 'INVALID_STATE_TRANSITION' ? '프로젝트의 연결 기록을 확인할 수 없어 삭제하지 않았습니다. 서버 기록을 점검해 주세요.'
+            : error.message);
+    } finally { setDeletingProjectId(null); }
+  }
+
   async function send(event) {
     event.preventDefault();
     if (!api || !message.trim()) return;
@@ -133,7 +151,7 @@ export function App() {
       {page === 'projects' && <><div className="page-title"><p className="eyebrow">YOUR PROJECTS</p><h1>Creator 프로젝트</h1><p>PC와 Android가 같은 서버의 작업과 승인 상태를 사용합니다.</p></div>
         <div className="workspace-layout"><section className="project-list card"><div className="section-head"><h2>프로젝트 목록</h2><button className="text-button" disabled={!api} onClick={() => reload().catch((error) => setStatus(error.message))}>새로고침</button></div>
           {!api && <p className="muted">서버에 연결해 주세요.</p>}{api && projects.length === 0 && <p className="muted">아직 프로젝트가 없습니다. 직접 파일을 선택해 시작해 주세요.</p>}
-          {projects.map((project, index) => <button key={project.project_id} className={`project-row ${selected?.project_id === project.project_id ? 'selected' : ''}`} onClick={() => setSelected(project)}><strong>쇼츠 프로젝트 {projects.length - index}</strong><small>{project.target_seconds}초 · {project.framing} · 버전 {project.current_version}</small><span>작업 보기 →</span></button>)}
+          {projects.map((project, index) => <article key={project.project_id} className={`project-entry ${selected?.project_id === project.project_id ? 'selected' : ''}`}><button className="project-row" onClick={() => setSelected(project)}><strong>쇼츠 프로젝트 {projects.length - index}</strong><small>{project.target_seconds}초 · {project.framing} · 버전 {project.current_version}</small><span>작업 보기 →</span></button><button className="project-delete" disabled={deletingProjectId === project.project_id} onClick={() => deleteProject(project)} aria-label={`쇼츠 프로젝트 ${projects.length - index} 삭제`}>{deletingProjectId === project.project_id ? '삭제 중…' : '삭제'}</button></article>)}
         </section><div>{selected && api ? <CreatorWorkspace key={selected.task_id} api={api} project={selected} onChanged={reload} /> : <div className="empty card">프로젝트를 선택해 기획과 미리보기를 확인해 주세요.</div>}</div></div></>}
       {['schedule', 'wellness', 'diary'].includes(page) && <PersonalWorkspace api={api} kind={page} />}
       {page === 'settings' && <SettingsWorkspace api={api} onConsentChange={setTextConsentId} />}
