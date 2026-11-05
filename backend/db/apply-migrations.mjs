@@ -7,7 +7,17 @@ import path from 'node:path';
 import { createPostgresPool } from '../src/adapters/postgres/connection.js';
 
 const baseDir = path.dirname(fileURLToPath(import.meta.url));
-const migrationsDir = path.join(baseDir, 'migrations');
+
+
+const targetDatabase = process.env.HAEJUMI_PG_DATABASE;
+
+const migrationsDir = path.join(
+  baseDir,
+  targetDatabase === 'haejumi_migration_test'
+    ? 'migrations-test'
+    : 'migrations'
+);
+
 
 function checksum(content) {
   return createHash('sha256').update(content).digest('hex');
