@@ -108,6 +108,21 @@ test('mixed edit saves only a cached trend selector and current version, without
   assert.equal(body.content_version, 4); assert.equal(body.content_hash, 'a'.repeat(64));
 });
 
+test('style references stay on authenticated local API and bind selected IDs to plan versions', async () => {
+  const calls = []; const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const referenceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const api = new HaejumiApi('synthetic-token', async (path, options) => { calls.push({ path, options }); return Response.json({ items: [] }); });
+  await api.styleReferences(id);
+  await api.addStyleReference(id, { kind: 'url', url: 'https://www.youtube.com/shorts/abcDEF123_-', note: '빠르게' }, 'reference-add-key');
+  await api.revisePlan(id, 2, '합성 여행 쇼츠', 'reference-plan-key', null, [referenceId]);
+  await api.updateScenes(id, { current_version: 3, content_hash: 'a'.repeat(64) },
+    [{ media_id: id, duration_seconds: 6 }], 'reference-scene-key', null, [referenceId]);
+  assert.ok(calls.every((call) => call.path.startsWith('/api/v1/tasks/') && call.options.headers.Authorization === 'Bearer synthetic-token'));
+  assert.deepEqual(JSON.parse(calls[2].options.body).reference_ids, [referenceId]);
+  assert.deepEqual(JSON.parse(calls[3].options.body).reference_ids, [referenceId]);
+  assert.equal(JSON.parse(calls[3].options.body).content_version, 3);
+});
+
 test('web request cancellation stops the local wait without automatic retry', async () => {
   let calls = 0;
   const controller = new AbortController();

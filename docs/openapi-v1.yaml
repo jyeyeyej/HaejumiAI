@@ -405,8 +405,8 @@ paths:
     post:
       tags: [Tasks]
       operationId: addCreatorStyleReference
-      summary: Register an explicit search result, supported URL, or owned uploaded video
-      description: Search selection uses only a fresh server cache. A YouTube URL may request official videos.list metadata only when live search is enabled and within the shared ten-request daily limit. Instagram and TikTok URLs are recorded without fetching media. An uploaded video is probed locally and sampled at 2fps for approximate screen-change times. No reference image or audio is copied to the output.
+      summary: Register a period trend, explicit search result, supported URL, or owned uploaded video
+      description: Trend and search selection use only a fresh server cache; a period trend requires at least two relevant items. A YouTube URL may request official videos.list metadata only when live search is enabled and within the shared ten-request daily limit. Instagram and TikTok URLs are recorded without fetching media. An uploaded video is probed locally and sampled at 2fps for approximate screen-change times. No reference image or audio is copied to the output.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -419,7 +419,7 @@ paths:
               additionalProperties: false
               required: [kind]
               properties:
-                kind: { type: string, enum: [search, url, upload] }
+                kind: { type: string, enum: [trend, search, url, upload] }
                 topic: { type: string, enum: [restaurant, cafe, travel] }
                 days: { type: integer, minimum: 1, maximum: 90 }
                 video_id: { type: string, pattern: '^[A-Za-z0-9_-]{11}$' }
@@ -2035,6 +2035,13 @@ components:
         recommended_media_order: { type: array, description: Suggested order only; actual order changes require a versioned scene edit and new approval., items: { type: string, format: uuid } }
         style_reference_ids: { type: array, maxItems: 8, items: { type: string, format: uuid } }
         style_references: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/StyleReference' } }
+        style_application:
+          type: object
+          description: Only local effects applied to the initial storyboard; reference media is not copied or sent to a provider.
+          properties:
+            source: { type: string, const: haejumi_local_rules }
+            applied_fields: { type: array, items: { type: string } }
+            limitation: { type: string }
         trend_reference:
           type: object
           description: Optional source evidence from cached YouTube titles/descriptions and public metrics. No reference video effects were inspected.
@@ -2116,7 +2123,8 @@ components:
       required: [reference_id, kind, analysis_scope, note, created_at]
       properties:
         reference_id: { type: string, format: uuid }
-        kind: { type: string, enum: [search, url, upload] }
+        kind: { type: string, enum: [trend, search, url, upload] }
+        video_id: { type: string, pattern: '^[A-Za-z0-9_-]{11}$' }
         platform: { type: [string, 'null'], enum: [youtube, instagram, tiktok, null] }
         url: { type: string, format: uri }
         media_id: { type: string, format: uuid }
@@ -2126,6 +2134,25 @@ components:
         limitation: { type: string }
         note: { type: string, maxLength: 500 }
         created_at: { type: string, format: date-time }
+        trend_summary:
+          type: object
+          description: Common topic and title terms from fresh YouTube metadata only; not video effects.
+          properties:
+            source: { type: string, const: youtube_data_api }
+            analysis_scope: { type: string, const: metadata_only }
+            topic: { type: string, enum: [restaurant, cafe, travel] }
+            queried_at: { type: string, format: date-time }
+            period_days: { type: integer }
+            keywords: { type: array, items: { type: string } }
+            title_patterns: { type: array, items: { type: string } }
+            references:
+              type: array
+              items:
+                type: object
+                properties:
+                  url: { type: string, format: uri }
+                  published_at: { type: string, format: date-time }
+                  view_count: { type: [integer, 'null'] }
         metadata:
           type: [object, 'null']
           properties:

@@ -51,6 +51,23 @@ test('successful metadata cache expires without retaining failed provider respon
   assert.equal(calls, 2);
 });
 
+test('explicit YouTube URL lookup uses official videos metadata once and caches it without claiming Shorts proof', async () => {
+  let calls = 0; const videoId = 'abcDEF123_-';
+  const trends = new YouTubeTrends({ apiKey: 'synthetic-key', enabled: true, fetchImpl: async (url) => {
+    calls += 1;
+    assert.equal(url.pathname, '/youtube/v3/videos');
+    assert.equal(url.searchParams.get('id'), videoId);
+    return { ok: true, json: async () => ({ items: [{ id: videoId, snippet: { title: '합성 여행 영상', publishedAt: '2026-11-01T00:00:00Z' },
+      statistics: { viewCount: '500' }, contentDetails: { duration: 'PT29S' } }] }) };
+  } });
+  const first = await trends.lookup(videoId);
+  const second = await trends.lookup(videoId);
+  assert.equal(calls, 1);
+  assert.deepEqual(first, second);
+  assert.equal(first.shorts_status, 'unconfirmed');
+  assert.equal(first.analysis_scope, 'metadata_only');
+});
+
 test('YouTube quota and provider errors fall back without retry or effect-analysis claims', async () => {
   let calls = 0;
   const trends = new YouTubeTrends({ apiKey: 'synthetic-key', enabled: true,

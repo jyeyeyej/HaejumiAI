@@ -7,7 +7,7 @@ import { MusicLibrary } from '../../security/music-library.js';
 import { CAPTION_FONT_SHA256 } from '../../media-engine/caption-font.js';
 import { validSceneEffects } from '../../media-engine/scene-effects.js';
 import { captionScene, validCaptionTimeline } from '../../media-engine/caption-timeline.js';
-import { summarizeTrend } from '../../../../shared/trend-edit.js';
+import { proposeReferenceEdit, summarizeTrend } from '../../../../shared/trend-edit.js';
 import { analyzeLocalStyleVideo, parseStyleReferenceUrl } from '../../media-engine/style-reference.js';
 import { resolveMediaToolPaths } from '../../media-engine/media-tool-paths.js';
 
@@ -392,27 +392,49 @@ export class LocalRepositories {
     if (!task || task.ownerId !== ownerId || !project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '프로젝트를 찾을 수 없습니다.');
     if (!isValidIdempotencyKey(idempotencyKey) || !input || typeof input !== 'object' || Array.isArray(input) ||
         Object.keys(input).some((key) => !['kind', 'url', 'media_id', 'topic', 'days', 'video_id', 'note'].includes(key)) ||
-        !['url', 'upload', 'search'].includes(input.kind) || typeof (input.note ?? '') !== 'string' || (input.note ?? '').length > 500)
+        !['url', 'upload', 'search', 'trend'].includes(input.kind) || typeof (input.note ?? '') !== 'string' || (input.note ?? '').length > 500)
       throw apiError(422, 'VALIDATION_ERROR', '참고 영상 입력을 확인해 주세요.');
+    if (['search', 'trend'].includes(input.kind) && (!['restaurant', 'cafe', 'travel'].includes(input.topic) ||
+        !Number.isInteger(input.days) || input.days < 1 || input.days > 90 ||
+        (input.kind === 'search' && (typeof input.video_id !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(input.video_id)))))
+      throw apiError(422, 'VALIDATION_ERROR', '검색 결과 선택 값을 확인해 주세요.');
     const fingerprint = JSON.stringify(input); const key = `${ownerId}:style-reference:${taskId}:${idempotencyKey}`;
     const prior = this.state.data.idempotency[key];
     if (prior) { if (prior.fingerprint !== fingerprint) throw apiError(409, 'IDEMPOTENCY_CONFLICT', '이미 사용한 요청 키입니다.');
       if (!(project.style_reference_candidates ?? []).some((item) => item.reference_id === prior.result.reference_id))
         throw apiError(409, 'INVALID_STATE_TRANSITION', '이미 삭제한 레퍼런스입니다.');
       return structuredClone(prior.result); }
+    const parsedInputUrl = input.kind === 'url' ? parseStyleReferenceUrl(input.url) : null;
+    const duplicate = (project.style_reference_candidates ?? []).find((item) =>
+      item.kind === input.kind && (input.kind === 'url' ? item.url === parsedInputUrl?.url :
+        input.kind === 'upload' ? item.media_id === input.media_id :
+          item.topic === input.topic && item.days === input.days &&
+          (input.kind === 'trend' || item.video_id === input.video_id || item.url === `https://www.youtube.com/watch?v=${input.video_id}`)));
+    if (duplicate) {
+      this.state.data.idempotency[key] = { fingerprint, result: duplicate }; this.state.save();
+      return structuredClone(duplicate);
+    }
     if ((project.style_reference_candidates ?? []).length >= 8) throw apiError(422, 'VALIDATION_ERROR', '참고 영상은 최대 8개까지 등록할 수 있습니다.');
     let candidate;
-    if (input.kind === 'search') {
+    if (input.kind === 'search' || input.kind === 'trend') {
       const cached = trends?.getCached({ topic: input.topic, days: input.days });
-      const item = cached?.items?.find((row) => row.video_id === input.video_id);
-      if (!item) throw apiError(409, 'TREND_CACHE_MISSING', '검색 결과가 만료되었습니다. 다시 검색해 주세요.');
-      candidate = { kind: 'search', platform: 'youtube', url: item.url, metadata: referenceMetadata(item),
-        analysis_scope: 'metadata_only', topic: input.topic, days: input.days };
+      if (input.kind === 'trend') {
+        const summary = summarizeTrend(cached);
+        if (!summary || summary.references.length < 2)
+          throw apiError(409, 'TREND_CACHE_MISSING', '관련 영상이 두 편 이상 확인되지 않았습니다. 검색 결과를 다시 확인해 주세요.');
+        candidate = { kind: 'trend', platform: 'youtube', analysis_scope: 'metadata_only', topic: input.topic, days: input.days,
+          trend_summary: summary, limitation: '제목·설명·게시일·조회수에 나타난 주제만 참고했습니다. 영상 내부 편집은 분석하지 않았습니다.' };
+      } else {
+        const item = cached?.items?.find((row) => row.video_id === input.video_id);
+        if (!item) throw apiError(409, 'TREND_CACHE_MISSING', '검색 결과가 만료되었습니다. 다시 검색해 주세요.');
+        candidate = { kind: 'search', platform: 'youtube', url: item.url, video_id: input.video_id, metadata: referenceMetadata(item),
+          analysis_scope: 'metadata_only', topic: input.topic, days: input.days };
+      }
     } else if (input.kind === 'url') {
       const parsed = parseStyleReferenceUrl(input.url);
       if (!parsed) throw apiError(422, 'VALIDATION_ERROR', '지원하는 HTTPS 쇼츠 URL을 확인해 주세요.');
       const cached = parsed.platform === 'youtube' ? trends?.getCachedVideo?.(parsed.video_id) : null;
-      const item = cached ?? (parsed.platform === 'youtube' ? await trends?.lookup?.(parsed.video_id) : null);
+      const item = cached ?? (parsed.platform === 'youtube' && trends?.enabled === true ? await trends.lookup(parsed.video_id) : null);
       candidate = { kind: 'url', platform: parsed.platform, url: parsed.url,
         analysis_scope: item ? 'metadata_only' : 'none', metadata: item ? referenceMetadata(item) : null,
         limitation: item ? '영상 내부 편집은 확인하지 않았습니다.' : '공식 API 접근 정보가 없어 영상 내용과 편집을 분석하지 않았습니다.' };
@@ -559,8 +581,30 @@ export class LocalRepositories {
         selectedMedia.push(selected);
       }
       const preparationElapsedMs = Math.max(0, Math.round(performance.now() - preparationStarted));
+      const selectedReferences = selectedStyleReferences(project, input.reference_ids ?? []);
       const generated = await creatorAgent.createPlan({ ownerId, taskId, project: structuredClone(project), requestText: input.request_text.trim(),
-        media: selectedMedia, revision: Boolean(project.creator_plan), privacyConsentId: input.privacy_consent_id ?? null });
+        media: selectedMedia, revision: Boolean(project.creator_plan), privacyConsentId: input.privacy_consent_id ?? null,
+        styleReferences: selectedReferences });
+      if ((selectedReferences.length || /빠르|하이라이트|역동|감성|부드럽|차분/u.test(input.request_text)) &&
+          Array.isArray(generated.plan?.scenes)) {
+        const trend = selectedReferences.find((item) => item.kind === 'trend')?.trend_summary ?? null;
+        const suggested = proposeReferenceEdit(generated.plan, generated.generation, trend,
+          [...selectedReferences, { note: input.request_text.trim(), analysis_scope: 'none' }]);
+        const byMedia = new Map(suggested.map((row) => [row.media_id, row]));
+        let effectsChanged = false;
+        generated.plan.scenes = generated.plan.scenes.map((scene) => {
+          const row = byMedia.get(scene.media_id);
+          if (!row) return scene;
+          if (['framing', 'motion', 'transition', 'subtitle_style', 'edit_style'].some((field) =>
+            row[field] !== undefined && row[field] !== (scene[field] ?? { framing: 'inherit', motion: 'static', transition: 'cut', subtitle_style: 'default', edit_style: 'basic' }[field])))
+            effectsChanged = true;
+          return { ...scene, framing: row.framing, motion: row.motion, transition: row.transition,
+            subtitle_style: row.subtitle_style, edit_style: row.edit_style, edit_reason: row.edit_reason };
+        });
+        if (effectsChanged) generated.plan.style_application = { source: 'haejumi_local_rules',
+          applied_fields: ['framing', 'motion', 'transition', 'subtitle_style', 'edit_style'],
+          limitation: '장면 순서·길이·자막 문구·음악은 레퍼런스에서 자동 복제하지 않았습니다.' };
+      }
       if (input.privacy_consent_id) generated.generation.diagnostic = { ...(generated.generation.diagnostic ?? {}),
         preparation_elapsed_ms: preparationElapsedMs,
         prepared_samples: preparedImageCount, prepared_bytes: preparedBytes, preparation_failures: preparationFailures };

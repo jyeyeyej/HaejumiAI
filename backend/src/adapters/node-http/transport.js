@@ -74,11 +74,23 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
       if (styleMatch && request.method === 'POST') {
         requireJson(request); requireIdempotencyKey(request);
         const body = await readJson(request);
-        if (!repositories.listStyleReferences(principal.ownerId, styleMatch[1])) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        const references = repositories.listStyleReferences(principal.ownerId, styleMatch[1]);
+        if (!references) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).some((key) => !['kind', 'url', 'media_id', 'topic', 'days', 'video_id', 'note'].includes(key)) ||
+            !['url', 'upload', 'search', 'trend'].includes(body.kind) || typeof (body.note ?? '') !== 'string' ||
+            (body.note ?? '').length > 500) return sendError(response, 422, 'VALIDATION_ERROR');
+        const idempotencyKey = `${principal.ownerId}:style-reference:${styleMatch[1]}:${request.headers['idempotency-key']}`;
         const parsed = body?.kind === 'url' ? parseStyleReferenceUrl(body.url) : null;
         if (body?.kind === 'url' && !parsed) return sendError(response, 422, 'VALIDATION_ERROR');
+        const duplicate = references.items.some((item) => item.kind === body.kind &&
+          (body.kind === 'url' ? item.url === parsed?.url : body.kind === 'upload' ? item.media_id === body.media_id :
+            item.topic === body.topic && item.days === body.days &&
+            (body.kind === 'trend' || item.video_id === body.video_id || item.url === `https://www.youtube.com/watch?v=${body.video_id}`)));
+        if (references.items.length >= 8 && !repositories.state.data.idempotency[idempotencyKey] && !duplicate)
+          return sendError(response, 422, 'VALIDATION_ERROR');
         if (parsed?.platform === 'youtube' && trends?.enabled && !trends.getCachedVideo?.(parsed.video_id) &&
-            !repositories.state.data.idempotency[`${principal.ownerId}:style-reference:${styleMatch[1]}:${request.headers['idempotency-key']}`] &&
+            !repositories.state.data.idempotency[idempotencyKey] && !duplicate &&
             !reserveTrendRequest()) return sendError(response, 429, 'RATE_LIMITED');
         return sendJson(response, 201, await repositories.addStyleReference(principal.ownerId, styleMatch[1], body,
           request.headers['idempotency-key'], trends));

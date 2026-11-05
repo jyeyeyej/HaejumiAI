@@ -41,8 +41,11 @@ test('owned search, URL and local video references attach to the plan and preser
   const project = repo.createForOwner(owner, { media_ids: [imageId], target_seconds: 6 }, randomUUID());
   const item = { video_id: 'abcDEF123_-', url: 'https://www.youtube.com/watch?v=abcDEF123_-', title: '합성 여행 쇼츠',
     description: '합성 여행 설명', published_at: new Date().toISOString(), view_count: 100, duration_seconds: 25 };
+  const second = { ...item, video_id: 'xyzDEF123_-', url: 'https://www.youtube.com/watch?v=xyzDEF123_-', title: '여행 브이로그 모음' };
   let externalCalls = 0;
-  const trends = { getCached: () => ({ items: [item] }), getCachedVideo: () => item,
+  const now = new Date();
+  const trends = { getCached: () => ({ status: 'ok', source: 'youtube_data_api', analysis_scope: 'metadata_only', topic: 'travel',
+    period: { from: new Date(now.getTime() - 30 * 86400000).toISOString(), to: now.toISOString() }, items: [item, second] }), getCachedVideo: () => item,
     lookup: async () => { externalCalls++; throw new Error('unexpected external call'); } };
   const searched = await repo.addStyleReference(owner, project.task_id,
     { kind: 'search', topic: 'travel', days: 30, video_id: item.video_id, note: '부드러운 분위기' }, randomUUID(), trends);
@@ -51,6 +54,21 @@ test('owned search, URL and local video references attach to the plan and preser
   const local = await repo.addStyleReference(owner, project.task_id,
     { kind: 'upload', media_id: videoId, note: '빠른 전개' }, randomUUID(), trends,
     async () => ({ duration_seconds: 6, width: 1080, height: 1920, pace: 'fast', cut_detection: 'sampled_scene_threshold' }));
+  const period = await repo.addStyleReference(owner, project.task_id,
+    { kind: 'trend', topic: 'travel', days: 30, note: '' }, randomUUID(), trends);
+  assert.equal(period.trend_summary.references.length, 2);
+  const samePeriod = await repo.addStyleReference(owner, project.task_id,
+    { kind: 'trend', topic: 'travel', days: 30, note: '' }, randomUUID(), trends);
+  assert.equal(samePeriod.reference_id, period.reference_id);
+  const failedMediaId = randomUUID();
+  writeFileSync(join(repo.blobDir, `${failedMediaId}.blob`), bytes);
+  state.data.media[failedMediaId] = { mediaId: failedMediaId, ownerId: owner, mediaType: 'video/mp4', status: 'available',
+    storageKey: `${failedMediaId}.blob`, sha256: sha256(bytes) };
+  const beforeFailure = repo.listStyleReferences(owner, project.task_id).items.length;
+  await assert.rejects(repo.addStyleReference(owner, project.task_id,
+    { kind: 'upload', media_id: failedMediaId }, randomUUID(), trends, async () => { throw new Error('SYNTHETIC_PROBE_FAILURE'); }),
+  /SYNTHETIC_PROBE_FAILURE/);
+  assert.equal(repo.listStyleReferences(owner, project.task_id).items.length, beforeFailure);
   assert.equal(externalCalls, 0);
   assert.equal(searched.analysis_scope, 'metadata_only');
   assert.equal(linked.analysis_scope, 'metadata_only');
@@ -58,11 +76,18 @@ test('owned search, URL and local video references attach to the plan and preser
   assert.equal(repo.listStyleReferences(other, project.task_id), null);
   await assert.rejects(repo.addStyleReference(other, project.task_id, { kind: 'url', url: item.url }, randomUUID(), trends), { code: 'RESOURCE_NOT_FOUND' });
   assert.throws(() => repo.deleteStyleReference(other, project.task_id, searched.reference_id), { code: 'RESOURCE_NOT_FOUND' });
-  const plan = await repo.createCreatorPlan(owner, project.task_id,
-    { content_version: project.current_version, request_text: '합성 여행 쇼츠', reference_ids: [searched.reference_id, local.reference_id] },
-    randomUUID(), new CreatorAgent({ gateway: null }));
-  assert.deepEqual(plan.plan.style_reference_ids, [searched.reference_id, local.reference_id]);
-  assert.equal(plan.plan.style_references[1].analysis.pace, 'fast');
+  const selections = [[searched.reference_id], [local.reference_id, searched.reference_id],
+    [period.reference_id, searched.reference_id, linked.reference_id, local.reference_id]];
+  let plan;
+  for (const ids of selections) {
+    plan = await repo.createCreatorPlan(owner, project.task_id,
+      { content_version: state.data.tasks[project.task_id].current_version, request_text: '합성 여행 쇼츠', reference_ids: ids },
+      randomUUID(), new CreatorAgent({ gateway: null }));
+    assert.deepEqual(plan.plan.style_reference_ids, ids);
+  }
+  assert.equal(plan.plan.style_references[3].analysis.pace, 'fast');
+  assert.equal(plan.plan.style_application.source, 'haejumi_local_rules');
+  assert.equal(plan.plan.scenes[0].motion, 'zoom_in');
   assert.throws(() => repo.deleteStyleReference(owner, project.task_id, searched.reference_id), { code: 'INVALID_STATE_TRANSITION' });
   const rows = proposeReferenceEdit(plan.plan, plan.generation, null, [local]);
   assert.equal(rows[0].motion, 'zoom_in');
@@ -121,11 +146,14 @@ test('local style probe reports only measurable properties of a synthetic video'
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'synthetic.mp4');
   execFileSync(mediaTools.ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i',
-    'testsrc2=size=320x180:rate=10:duration=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path], { windowsHide: true });
+    'color=c=red:s=320x180:r=10:d=2', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=10:d=2',
+    '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0[v]', '-map', '[v]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path], { windowsHide: true });
   const result = await analyzeLocalStyleVideo(path, mediaTools);
   assert.ok(result.duration_seconds >= 3.9 && result.duration_seconds <= 4.1);
   assert.deepEqual([result.width, result.height], [320, 180]);
-  assert.ok(['sampled_scene_threshold', 'unavailable'].includes(result.cut_detection));
+  assert.equal(result.cut_detection, 'sampled_scene_threshold');
+  assert.ok(result.cut_times_seconds.some((time) => Math.abs(time - 2) <= 0.5));
   assert.equal(Object.hasOwn(result, 'subtitle_font'), false);
   assert.equal(Object.hasOwn(result, 'music'), false);
 });

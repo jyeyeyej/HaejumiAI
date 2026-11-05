@@ -25,7 +25,15 @@ test('legacy local plan cannot copy a planning instruction into publication titl
 test('trend edit controls show separate evidence and local recommendations with a reset action', () => {
   const jsx = readFileSync(new URL('../src/ui/CreatorWorkspace.jsx', import.meta.url), 'utf8');
   assert.match(jsx, /검색에서 확인된 사실/);
-  assert.match(jsx, /해주미의 장면 효과는 Vision 분류를 바탕으로 한 자체 추천/);
+  assert.match(jsx, /해주미의 효과는 자체 추천/);
+  assert.match(jsx, /참고 영상 URL 추가/);
+  assert.match(jsx, /참고 영상 직접 업로드/);
+  assert.match(jsx, /메타데이터 기반 참고/);
+  assert.match(jsx, /기간별 트렌드 분석 추가/);
+  assert.match(jsx, /role="tablist"/);
+  assert.match(jsx, /sessionStorage\.setItem\(draftKey/);
+  assert.match(jsx, /쇼츠 기획안 생성/);
+  assert.doesNotMatch(jsx, /이 주제를 기획 요청에 반영/);
   assert.match(jsx, /트렌드 혼합 편집 적용/);
   assert.match(jsx, /기본 효과 적용/);
   assert.match(jsx, /아직 영상에 반영되지 않았습니다/);

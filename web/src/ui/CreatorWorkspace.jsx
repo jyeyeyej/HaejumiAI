@@ -14,6 +14,7 @@ export function CreatorWorkspace({ api, project, onChanged }) {
   const [requestText, setRequestText] = useState('');
   const [visionNotice, setVisionNotice] = useState(null);
   const [visionChecked, setVisionChecked] = useState(false);
+  const [useVisionForPlan, setUseVisionForPlan] = useState(false);
   const [visionConsentId, setVisionConsentId] = useState(null);
   const [usage, setUsage] = useState(null);
   const [trendResult, setTrendResult] = useState(null);
@@ -25,12 +26,19 @@ export function CreatorWorkspace({ api, project, onChanged }) {
   const previewRef = useRef(null);
   const keys = useRef(new Map());
   const taskId = project.task_id;
+  const draftKey = `haejumi:creator-plan:${taskId}`;
 
   const refresh = useCallback(async () => {
     const task = await api.task(taskId);
     const [checkpoints, jobs, tracks, publications, references] = await Promise.all([api.checkpoints(taskId), api.jobs(taskId), api.tracks(), api.publications(taskId), api.styleReferences(taskId)]);
     setStyleReferences(references.items);
-    if (!referencesLoaded.current) { setSelectedReferenceIds(references.selected_ids); referencesLoaded.current = true; }
+    if (!referencesLoaded.current) {
+      let saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem(draftKey) ?? 'null'); } catch { /* Ignore stale local UI state. */ }
+      setSelectedReferenceIds(Array.isArray(saved?.reference_ids) ? saved.reference_ids.filter((id) => references.items.some((item) => item.reference_id === id)) : references.selected_ids);
+      setRequestText(typeof saved?.request_text === 'string' ? saved.request_text : '');
+      referencesLoaded.current = true;
+    }
     const optional = async (call) => { try { return await call(); } catch (error) { if (error instanceof ApiError && error.status === 409) return null; throw error; } };
     const planCheckpoint = currentCheckpoint(checkpoints.items, 'plan', task);
     const draftCheckpoint = currentCheckpoint(checkpoints.items, 'draft', task);
@@ -45,7 +53,7 @@ export function CreatorWorkspace({ api, project, onChanged }) {
     }
     setSnapshot({ task, checkpoints: checkpoints.items, job: latest, plan, draft, tracks: tracks.items, publications: publications.items });
     setMessage('서버의 현재 버전과 승인 상태를 불러왔습니다.');
-  }, [api, taskId]);
+  }, [api, taskId, draftKey]);
 
   useEffect(() => {
     setSnapshot(null); setRequestText(''); setTrendResult(null); setStyleReferences([]); setSelectedReferenceIds([]);
@@ -60,6 +68,11 @@ export function CreatorWorkspace({ api, project, onChanged }) {
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', listener);
       if (previewRef.current) URL.revokeObjectURL(previewRef.current.url); previewRef.current = null; };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!referencesLoaded.current) return;
+    try { sessionStorage.setItem(draftKey, JSON.stringify({ reference_ids: selectedReferenceIds, request_text: requestText })); } catch { /* Browser storage may be unavailable. */ }
+  }, [draftKey, selectedReferenceIds, requestText]);
 
   function keyFor(fingerprint) {
     if (!keys.current.has(fingerprint)) keys.current.set(fingerprint, crypto.randomUUID());
@@ -77,14 +90,15 @@ export function CreatorWorkspace({ api, project, onChanged }) {
   }
 
   async function generatePlan(task, useVision) {
-    if (!useVision) return run(() => api.revisePlan(taskId, task.current_version, requestText.trim(),
-      keyFor(`plan:local:${task.current_version}:${requestText.trim()}:${selectedReferenceIds.join(',')}`), null, selectedReferenceIds), '새 기획안이 준비됐습니다.');
+    const instruction = requestText.trim() || '선택한 미디어로 쇼츠 기획안을 만들어 주세요.';
+    if (!useVision) return run(() => api.revisePlan(taskId, task.current_version, instruction,
+      keyFor(`plan:local:${task.current_version}:${instruction}:${selectedReferenceIds.join(',')}`), null, selectedReferenceIds), '새 기획안이 준비됐습니다.');
     if (!visionNotice || !visionChecked || !visionAvailability(usage).ready) return;
     return run(async () => {
       const consent = await api.grantVisionConsent(visionNotice, project.media_ids);
       setVisionConsentId(consent.consent_id);
-      const result = await api.revisePlan(taskId, task.current_version, requestText.trim(),
-        keyFor(`plan:vision:${task.current_version}:${requestText.trim()}:${consent.consent_id}:${selectedReferenceIds.join(',')}`), consent.consent_id, selectedReferenceIds);
+      const result = await api.revisePlan(taskId, task.current_version, instruction,
+        keyFor(`plan:vision:${task.current_version}:${instruction}:${consent.consent_id}:${selectedReferenceIds.join(',')}`), consent.consent_id, selectedReferenceIds);
       setVisionChecked(false);
       setUsage(await api.llmUsage().catch(() => usage));
       return result;
@@ -120,8 +134,11 @@ export function CreatorWorkspace({ api, project, onChanged }) {
       <p className="notice" role="status">{message}</p>
     </section>
     <section className="card workspace-card"><p className="eyebrow">01 · PLAN</p><h2>쇼츠 기획안</h2>
-      <TrendPanel api={api} taskId={taskId} onResult={setTrendResult} onTopic={(topic) => setRequestText((prior) => `${prior.trim()} ${topic} 분위기를 참고해 장면별 효과를 제안해 주세요.`.trim())}
+      <TrendPanel api={api} taskId={taskId} onResult={setTrendResult}
         references={styleReferences} selectedIds={selectedReferenceIds} onSelect={setSelectedReferenceIds} onRefresh={refresh} busy={busy} />
+      <div className="scene"><div><h3>원하는 스타일 및 기획 요청</h3>
+        <textarea id="plan-request" rows="4" maxLength="4000" value={requestText} onChange={(event) => setRequestText(event.target.value)} placeholder="예: 최근 30일 맛집 경향을 참고하고, 선택한 영상처럼 빠르게 전개하되 자막은 깔끔하게 만들어 주세요." />
+        <p className="muted">선택한 레퍼런스 {selectedReferenceIds.length}개와 이 문구를 함께 기획에 저장합니다. 레퍼런스의 확인 가능한 정보만 활용합니다.</p></div></div>
       {plan ? <><h3>{plan.plan.title_idea}</h3><p className="muted">{plan.plan.aspect_ratio} · {plan.plan.target_seconds}초 · 버전 {plan.content_version} · {plan.generation?.source === 'gateway' ? 'OpenAI 분석' : plan.generation?.source === 'mock' ? 'Mock 분석' : '로컬 규칙 초안'}</p>
         {plan.generation?.source === 'gateway' && plan.generation?.fallback_used && <p className="warning">OpenAI 응답에서 검증 가능한 장면 자막만 부분 반영했습니다. 기획과 자막을 직접 확인해 주세요.</p>}
         {plan.generation?.source === 'local_rules' && <p className="warning" role="alert">{visionGenerationMessage(plan.generation)}</p>}
@@ -133,21 +150,20 @@ export function CreatorWorkspace({ api, project, onChanged }) {
         {plan.plan.theme && <p>주제: {plan.plan.theme} · 분위기: {plan.plan.mood}<br />오프닝: {plan.plan.opening_hook}<br />흐름: {plan.plan.story_flow}<br />엔딩: {plan.plan.ending_line}<br />추천 순서: {plan.plan.recommended_media_order?.map((id) => project.media_ids.indexOf(id) + 1).join(' → ')} (적용하려면 아래에서 장면 순서를 수정해 주세요)</p>}
         {plan.plan.media_insights?.map((insight, index) => <p className="muted" key={insight.media_id}>미디어 {index + 1}: {insight.description} · 분류 {insight.category ?? '미확인'} · 구도 {insight.orientation ?? '미확인'} · {insight.usable_detail}{insight.uncertainty && ` · 불확실: ${insight.uncertainty}`}</p>)}
         {plan.plan.trend_reference && <div className="scene"><div><strong>검색에서 확인된 사실</strong><p className="muted">YouTube 제목·설명 메타데이터 · 조회 기준 {plan.plan.trend_reference.queried_at} · 키워드 {plan.plan.trend_reference.keywords.join(', ') || '없음'} · 제목 표현 {plan.plan.trend_reference.title_patterns?.join(', ') || '없음'} · 영상 내부 효과 분석 없음</p>{plan.plan.trend_reference.references.map((item) => <small key={item.url}><a href={item.url} target="_blank" rel="noopener noreferrer">참고 영상</a> · 게시 {item.published_at?.slice(0, 10)} · 조회 {item.view_count ?? '미제공'}<br /></small>)}</div></div>}
-        {plan.plan.style_references?.length > 0 && <div className="scene"><div><strong>현재 기획에 적용한 레퍼런스</strong>{plan.plan.style_references.map((item) => <p className="muted" key={item.reference_id}>{item.kind === 'upload' ? `직접 선택 영상 · ${item.analysis?.duration_seconds}초 · 화면 변화 추정 ${item.analysis?.pace ?? '미확인'}` : `${item.platform} · ${item.metadata?.title || '제목 미확인'}`} · {item.analysis_scope === 'metadata_only' ? '메타데이터 기반 참고 · 영상 내부 분석 없음' : item.analysis_scope === 'local_video_sample' ? '로컬 영상 샘플 분석' : '영상 내용 미분석'} · {item.note || '추가 스타일 설명 없음'}</p>)}</div></div>}
+        {plan.plan.style_references?.length > 0 && <div className="scene"><div><strong>현재 기획에 저장된 레퍼런스</strong>{plan.plan.style_references.map((item) => <p className="muted" key={item.reference_id}>{item.kind === 'trend' ? `최근 ${item.days}일 ${item.topic} 영상 ${item.trend_summary?.references.length ?? 0}편` : item.kind === 'upload' ? `직접 선택 영상 · ${item.analysis?.duration_seconds}초 · 화면 변화 추정 ${item.analysis?.pace ?? '미확인'}` : `${item.platform} · ${item.metadata?.title || '제목 미확인'}`} · {item.analysis_scope === 'metadata_only' ? '메타데이터 기반 참고 · 영상 내부 분석 없음' : item.analysis_scope === 'local_video_sample' ? '로컬 영상 샘플 분석' : '영상 내용 미분석'} · {item.note || '추가 스타일 설명 없음'}</p>)}{plan.plan.style_application && <p className="muted">실제 기획 장면 효과: 배치·움직임·전환·자막 스타일·색감에 해주미 로컬 규칙을 적용했습니다. {plan.plan.style_application.limitation}</p>}</div></div>}
         <div className="scenes">{plan.plan.scenes.map((scene) => <div key={scene.order} className="scene"><span className="scene-number">{String(scene.order).padStart(2, '0')}</span><div><strong>{scene.start_seconds}–{scene.end_seconds}초</strong><p>{scene.visual_direction}</p><small>저장된 렌더 효과: {scene.framing ?? '프로젝트 설정'} · {scene.motion ?? '고정'} · {scene.transition ?? '컷'} · {editStyleLabel(scene.edit_style)} · 자막 {scene.subtitle_style ?? '기본'}<br />{scene.caption_text ? `장면 문구 제안: ${scene.caption_text}` : '자막 제안 없음 · 초안에서 직접 작성'}</small></div></div>)}</div>
         <PlanSceneEditor key={`${taskId}:${task.current_version}`} api={api} taskId={taskId} task={task} plan={plan.plan} generation={plan.generation} trendResult={trendResult} references={selectedReferenceIds.map((id) => styleReferences.find((item) => item.reference_id === id)).filter(Boolean)} selectedReferenceIds={selectedReferenceIds} planApproval={planCheck?.status} draftApproval={draftCheck?.status} busy={busy} run={run} keyFor={keyFor} />
       </> : <p className="muted">기획안을 아직 만들지 않았습니다. 로컬 규칙 기획을 요청해 주세요.</p>}
-      <label htmlFor="plan-request">{plan ? '기획 수정 요청' : '기획 요청'}</label><textarea id="plan-request" rows="3" maxLength="4000" value={requestText} onChange={(event) => setRequestText(event.target.value)} placeholder="원하는 분위기와 장면 구성을 적어 주세요." />
-      <div className="button-row"><button disabled={busy || !requestText.trim()} onClick={() => generatePlan(task, false)}>{plan ? '로컬 수정안 만들기' : '로컬 기획안 만들기'}</button>
-        {plan && planCheck?.status === 'pending' && <button className="secondary" disabled={busy} onClick={() => run(() => api.approve(taskId, planCheck, keyFor(`approve:${planCheck.checkpoint_id}`)), '현재 기획을 중간 승인했습니다.')}>기획 중간 승인</button>}</div>
+      {plan && planCheck?.status === 'pending' && <button className="secondary" disabled={busy} onClick={() => run(() => api.approve(taskId, planCheck, keyFor(`approve:${planCheck.checkpoint_id}`)), '현재 기획을 중간 승인했습니다.')}>기획 중간 승인</button>}
       {visionNotice && <div className="scene"><div><strong>선택 미디어 Vision 분석</strong><p>{visionNotice.disclosure}</p>
         <p className="muted">대상: 이 프로젝트의 미디어 {project.media_ids.length}개 (ID: {project.media_ids.join(', ')}) · 전송: 앞에서 최대 {Math.min(project.media_ids.length, visionNotice.vision_max_images ?? 5)}개의 축소 이미지 또는 영상 추출 프레임 · 긴 변 최대 {visionNotice.vision_max_side ?? 1024}px · 이미지당 최대 {Math.round((visionNotice.vision_max_bytes_per_image ?? 2097152) / 1048576)}MiB · 요청 문구 포함</p>
         <p className="muted">예약 비용 추정 상한: ${((visionNotice.estimated_cost_usd_max ?? 0.05) * Math.min(1, project.media_ids.length / (visionNotice.vision_max_images ?? 5))).toFixed(3)}. 실제 과금액 보증은 아닙니다. 업체: OpenAI · 목적: 쇼츠 기획 및 자막 초안</p>
         <label className="check"><input type="checkbox" checked={visionChecked} onChange={(event) => setVisionChecked(event.target.checked)} />위 대상과 전송 범위를 확인하고 이번 분석에 동의합니다.</label>
-        <button disabled={busy || !requestText.trim() || !visionChecked || !visionState.ready} onClick={() => generatePlan(task, true)}>동의하고 Vision 기획안 만들기</button>
         {visionConsentId && <button className="secondary" disabled={busy} onClick={() => run(async () => { await api.revokeConsent(visionConsentId); setVisionConsentId(null); }, 'Vision 동의를 철회했습니다. 이미 전송된 데이터는 회수할 수 없습니다.')}>이번 Vision 동의 철회</button>}
         <p className="muted" role="status">{visionState.message}</p></div></div>}
-      <small>수정 요청은 새 버전을 만들고 기존 승인을 무효화합니다. 로컬 버튼은 외부 AI를 호출하지 않습니다.</small>
+      <label className="check"><input type="checkbox" checked={useVisionForPlan} onChange={(event) => setUseVisionForPlan(event.target.checked)} />선택 미디어 Vision 분석을 이번 기획에 사용 (별도 동의 필요)</label>
+      <button disabled={busy || (useVisionForPlan && (!visionChecked || !visionState.ready))} onClick={() => generatePlan(task, useVisionForPlan)}>쇼츠 기획안 생성</button>
+      <small>Vision을 선택하지 않으면 외부 AI를 호출하지 않습니다. 기획을 다시 생성하면 새 콘텐츠 버전이 되고 기존 승인이 무효화됩니다.</small>
     </section>
     <DraftSection key={`${taskId}:${task.current_version}:${draft?.checkpoint?.checkpoint_id ?? 'none'}`} api={api} task={task} taskId={taskId} draft={draft} scenes={plan?.plan?.scenes ?? []} generation={plan?.generation} tracks={tracks} checkpoint={draftCheck} busy={busy} run={run} keyFor={keyFor} />
     <section className="card workspace-card"><p className="eyebrow">03 · RENDER</p><h2>영상 미리보기</h2>
@@ -172,28 +188,31 @@ export function CreatorWorkspace({ api, project, onChanged }) {
   </div>;
 }
 
-function TrendPanel({ api, taskId, onTopic, onResult, references, selectedIds, onSelect, onRefresh, busy: workspaceBusy }) {
+function TrendPanel({ api, taskId, onResult, references, selectedIds, onSelect, onRefresh, busy: workspaceBusy }) {
   const [topic, setTopic] = useState('restaurant'); const [days, setDays] = useState(30);
+  const [tab, setTab] = useState('popular');
   const [result, setResult] = useState(null); const [busy, setBusy] = useState(false);
   const [url, setUrl] = useState(''); const [note, setNote] = useState(''); const [file, setFile] = useState(null);
   const [uploadedMediaId, setUploadedMediaId] = useState(null); const [rightsConfirmed, setRightsConfirmed] = useState(false);
+  const [uploadState, setUploadState] = useState('idle');
   const [notice, setNotice] = useState('');
   const labels = { restaurant: '맛집', cafe: '카페', travel: '여행' };
   async function search() { setBusy(true); try { const next = await api.trends(topic, Number(days)); setResult(next); onResult(next); } catch (error) { const next = { status: 'unavailable', reason: error.code ?? 'API_UNAVAILABLE', items: [] }; setResult(next); onResult(next); } finally { setBusy(false); } }
   async function add(body) {
     setBusy(true); setNotice('참고 정보를 확인하고 있습니다.');
-    try { const added = await api.addStyleReference(taskId, body); onSelect((prior) => [...prior, added.reference_id]); await onRefresh();
-      setNotice(added.analysis_scope === 'local_video_sample' ? 'PC에서 선택한 영상의 길이와 화면 변화 샘플을 분석했습니다.' :
+    try { const added = await api.addStyleReference(taskId, body); const alreadyRegistered = references.some((item) => item.reference_id === added.reference_id);
+      onSelect((prior) => prior.includes(added.reference_id) ? prior : [...prior, added.reference_id]); await onRefresh();
+      setNotice(alreadyRegistered ? '이미 등록된 레퍼런스를 선택했습니다. 중복 후보는 만들지 않았습니다.' : added.analysis_scope === 'local_video_sample' ? 'PC에서 선택한 영상의 길이와 화면 변화 샘플을 분석했습니다.' :
         added.analysis_scope === 'metadata_only' ? '공식 메타데이터만 확인했습니다. 영상 내부 편집은 분석하지 않았습니다.' : 'URL을 저장했습니다. 영상 내부 정보는 확인하지 못했습니다.');
     } catch (error) { setNotice(error.message); } finally { setBusy(false); }
   }
   async function addUpload() {
     if (!file || !rightsConfirmed) return;
-    setBusy(true); setNotice('선택한 영상을 로컬 서버에 업로드하고 있습니다.');
+    setBusy(true); setUploadState('analyzing'); setNotice('선택한 영상을 로컬 서버에 업로드하고 있습니다.');
     try { const mediaId = uploadedMediaId ?? await api.upload(file); setUploadedMediaId(mediaId);
       const added = await api.addStyleReference(taskId, { kind: 'upload', media_id: mediaId, note });
-      onSelect((prior) => [...prior, added.reference_id]); await onRefresh(); setNotice('로컬 참고 영상 분석이 완료됐습니다. 원본 화면·음원은 출력 영상에 복사하지 않습니다.');
-    } catch (error) { setNotice(error.message); } finally { setBusy(false); }
+      onSelect((prior) => prior.includes(added.reference_id) ? prior : [...prior, added.reference_id]); await onRefresh(); setUploadState('complete'); setNotice('로컬 참고 영상 분석이 완료됐습니다. 원본 화면·음원은 출력 영상에 복사하지 않습니다.');
+    } catch (error) { setUploadState('failed'); setNotice(`참고 영상 분석 실패: ${error.message} 선택한 파일은 유지되며 다시 시도할 수 있습니다.`); } finally { setBusy(false); }
   }
   async function remove(id) {
     setBusy(true); try { await api.deleteStyleReference(taskId, id); onSelect((prior) => prior.filter((item) => item !== id)); await onRefresh(); setNotice('레퍼런스를 삭제했습니다.'); }
@@ -201,28 +220,34 @@ function TrendPanel({ api, taskId, onTopic, onResult, references, selectedIds, o
   }
   const move = (id, direction) => onSelect((prior) => { const next = [...prior]; const index = next.indexOf(id); const target = index + direction;
     if (index < 0 || target < 0 || target >= next.length) return prior; [next[index], next[target]] = [next[target], next[index]]; return next; });
-  return <div className="scene"><div><h3>쇼츠 스타일 레퍼런스</h3><p className="muted">검색 메타데이터, 직접 입력한 URL, 권리를 가진 로컬 영상을 구분합니다. 선택 후 기획안을 만들거나 아래 장면 구성을 저장해야 현재 버전에 반영됩니다.</p>
-    <h4>최근 인기 영상 검색</h4><p className="muted">공식 YouTube Data API의 제목·게시일·조회·반응 지표만 사용합니다. 영상 내부 효과나 Shorts 여부는 확정하지 않습니다. 검색 버튼을 누를 때만 외부 API를 요청하며 기존 일일 10회 제한과 15분 캐시를 적용합니다.</p>
+  return <div className="scene"><div><h3>레퍼런스 가져오기</h3><p className="muted">세 가지 방법을 자유롭게 조합할 수 있습니다. 등록과 분석은 기획 실행과 별개이며, 선택한 항목은 아래에서 확인할 수 있습니다.</p>
+    <div className="button-row" role="tablist" aria-label="레퍼런스 가져오기 방법">
+      {[["popular", "인기 영상"], ["url", "URL 입력"], ["upload", "파일 업로드"]].map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? '' : 'secondary'} onClick={() => setTab(id)}>{label}</button>)}
+    </div>
+    {tab === 'popular' && <div role="tabpanel"><h4>최근 인기 영상 분석</h4><p className="muted">공식 YouTube Data API의 제목·게시일·조회·반응 지표만 사용합니다. 영상 내부 효과나 Shorts 여부는 확정하지 않습니다. 검색 버튼을 누를 때만 외부 API를 요청하며 기존 일일 10회 제한과 15분 캐시를 적용합니다.</p>
     <label>주제 <select value={topic} onChange={(event) => { setTopic(event.target.value); setResult(null); onResult(null); }}>{Object.entries(labels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
     <label>최근 기간 <select value={days} onChange={(event) => { setDays(Number(event.target.value)); setResult(null); onResult(null); }}><option value={7}>7일</option><option value={30}>30일</option><option value={90}>90일</option></select></label>
     <button disabled={busy || workspaceBusy} onClick={search}>{busy ? '확인 중…' : '최근 영상 찾기'}</button>
     {result?.status === 'unavailable' && <p className="muted" role="status">공식 검색을 사용할 수 없습니다({result.reason}). 로컬 편집은 계속 사용할 수 있습니다.</p>}
     {result?.status === 'ok' && <><p className="muted">{result.period.from.slice(0, 10)} 이후 · 메타데이터 기반 참고 · 영상 내부 분석 없음</p>
-      {result.items.map((item) => <p key={item.video_id}><a href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a><br /><small>게시 {item.published_at?.slice(0, 10) ?? '미확인'} · 조회 {item.view_count ?? '미제공'} · 좋아요 {item.like_count ?? '미제공'} · {item.duration_seconds}초 · Shorts 여부 미확인</small><br /><button className="secondary" disabled={busy || references.length >= 8} onClick={() => add({ kind: 'search', topic, days, video_id: item.video_id, note })}>이 검색 결과를 참고</button></p>)}
+      <button className="secondary" disabled={busy || workspaceBusy || references.length >= 8 || result.items.length < 2} onClick={() => add({ kind: 'trend', topic, days, note })}>기간별 트렌드 분석 추가</button>
+      {result.items.length < 2 && <p className="muted">관련 영상이 두 편 이상 확인되지 않아 기간별 공통 경향은 추가할 수 없습니다.</p>}
+      {result.items.map((item) => <p key={item.video_id}><a href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a><br /><small>게시 {item.published_at?.slice(0, 10) ?? '미확인'} · 조회 {item.view_count ?? '미제공'} · 좋아요 {item.like_count ?? '미제공'} · {item.duration_seconds}초 · Shorts 여부 미확인</small><br /><button className="secondary" disabled={busy || references.length >= 8} onClick={() => add({ kind: 'search', topic, days, video_id: item.video_id, note })}>레퍼런스에 추가</button></p>)}
       {!result.items.length && <p className="muted">해당 기간에 확인된 짧은 영상이 없습니다.</p>}
     </>}
-    <button className="secondary" onClick={() => onTopic(labels[topic])}>이 주제를 기획 요청에 반영</button>
-    <h4>참고 영상 URL 추가</h4><label>HTTPS YouTube Shorts·Instagram Reels·TikTok URL <input type="url" value={url} maxLength="500" onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/shorts/…" /></label>
+    </div>}
+    {tab === 'url' && <div role="tabpanel"><h4>참고 영상 URL 추가</h4><label>HTTPS YouTube Shorts·Instagram Reels·TikTok URL <input type="url" value={url} maxLength="500" onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/shorts/…" /></label>
     <button className="secondary" disabled={busy || workspaceBusy || !url.trim() || references.length >= 8} onClick={() => add({ kind: 'url', url: url.trim(), note })}>URL 등록·접근 정보 확인</button>
-    <p className="muted">YouTube는 공식 API가 활성화된 경우 공개 메타데이터만 조회합니다. Instagram·TikTok은 현재 접근 권한이 없어 URL과 사용자 설명만 저장합니다. 영상을 다운로드하거나 로그인·DRM을 우회하지 않습니다.</p>
-    <h4>참고 영상 직접 업로드</h4><label>권리를 가진 MP4·MOV 선택 <input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setUploadedMediaId(null); setRightsConfirmed(false); }} /></label>
+    <p className="muted">YouTube는 공식 API가 활성화된 경우 공개 메타데이터만 조회합니다. Instagram·TikTok은 현재 접근 권한이 없어 URL과 사용자 설명만 저장합니다. 영상을 다운로드하거나 로그인·DRM을 우회하지 않습니다.</p></div>}
+    {tab === 'upload' && <div role="tabpanel"><h4>참고 영상 직접 업로드</h4><label>권리를 가진 MP4·MOV 선택 <input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setUploadedMediaId(null); setRightsConfirmed(false); setUploadState('idle'); }} /></label>
+    {file && <p className="muted">선택한 파일: {file.name} · {Math.round(file.size / 1048576 * 10) / 10} MiB · {uploadState === 'analyzing' ? '분석 중' : uploadState === 'complete' ? '분석 완료' : uploadState === 'failed' ? '실패 · 재시도 가능' : '미분석'}</p>}
     <label className="check"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => setRightsConfirmed(event.target.checked)} />이 영상의 분석 권한을 가지고 있으며 직접 선택했습니다.</label>
     <button className="secondary" disabled={busy || workspaceBusy || !file || !rightsConfirmed || references.length >= 8} onClick={addUpload}>{uploadedMediaId ? '업로드된 영상 분석 다시 시도' : '선택 영상 업로드·로컬 분석'}</button>
-    <p className="muted">길이·화면 비율과 축소 샘플의 화면 변화만 분석합니다. 자막 글꼴·음악·감정·실제 컷은 자동 판정하지 않습니다. 외부 AI로 전송하지 않습니다.</p>
+    <p className="muted">길이·화면 비율과 축소 샘플의 화면 변화만 분석합니다. 자막 글꼴·음악·감정·실제 컷은 자동 판정하지 않습니다. 외부 AI로 전송하지 않습니다.</p></div>}
     <label>원하는 편집 느낌 <textarea rows="3" maxLength="500" value={note} onChange={(event) => setNote(event.target.value)} placeholder="예: 빠르게 전개하되 자막은 깔끔하게" /></label>
-    <h4>선택한 레퍼런스 · 위에 있는 항목 우선</h4>
-    {references.map((item) => <div className="scene" key={item.reference_id}><div><label className="check"><input type="checkbox" checked={selectedIds.includes(item.reference_id)} onChange={(event) => onSelect((prior) => event.target.checked ? [...prior, item.reference_id] : prior.filter((id) => id !== item.reference_id))} />{item.kind === 'upload' ? '직접 선택 영상' : item.metadata?.title || `${item.platform} URL`}</label>
-      <small>{item.analysis_scope === 'metadata_only' ? '메타데이터 기반 참고' : item.analysis_scope === 'local_video_sample' ? '로컬 영상 샘플 분석' : '영상 내용 미분석'} · {item.analysis?.pace && `화면 변화 추정: ${item.analysis.pace} · `}{item.note || '스타일 설명 없음'}</small>
+    <h3>내 레퍼런스</h3><p className="muted">{selectedIds.length}개 선택 · 위에 있는 항목 우선 · 선택만으로 기존 승인이나 렌더가 바뀌지 않습니다.</p>
+    {references.map((item) => <div className="scene" key={item.reference_id}><div><label className="check"><input type="checkbox" checked={selectedIds.includes(item.reference_id)} onChange={(event) => onSelect((prior) => event.target.checked ? [...prior, item.reference_id] : prior.filter((id) => id !== item.reference_id))} />{item.kind === 'trend' ? `최근 ${item.days}일 ${labels[item.topic]} 경향` : item.kind === 'upload' ? '직접 선택 영상' : item.metadata?.title || `${item.platform} URL`}</label>
+      <small>{item.kind === 'trend' ? '트렌드' : item.kind === 'upload' ? '업로드' : 'URL·영상'} · {item.analysis_scope === 'metadata_only' ? '메타데이터만 확인' : item.analysis_scope === 'local_video_sample' ? '로컬 분석 완료' : '영상 내용 미분석'} · {item.trend_summary && `관련 영상 ${item.trend_summary.references.length}편 · 키워드 ${item.trend_summary.keywords.join(', ') || '없음'} · `}{item.analysis?.pace && `화면 변화 추정: ${item.analysis.pace} · `}{item.note || '스타일 설명 없음'}</small>
       <div className="button-row"><button className="secondary" disabled={busy || !selectedIds.includes(item.reference_id) || selectedIds[0] === item.reference_id} onClick={() => move(item.reference_id, -1)}>우선</button><button className="secondary" disabled={busy || !selectedIds.includes(item.reference_id) || selectedIds.at(-1) === item.reference_id} onClick={() => move(item.reference_id, 1)}>뒤로</button><button className="secondary" disabled={busy} onClick={() => remove(item.reference_id)}>삭제</button></div></div></div>)}
     {!references.length && <p className="muted">저장된 레퍼런스가 없습니다.</p>}
     <p className="muted" role="status">{notice}</p>
@@ -278,10 +303,11 @@ function PlanSceneEditor({ api, taskId, task, plan, generation, trendResult, ref
   const [rows, setRows] = useState(initialRows);
   const [trendQuery, setTrendQuery] = useState(undefined);
   const [edited, setEdited] = useState(false);
+  const chosenTrend = references.find((item) => item.kind === 'trend');
   const chosenSearch = references.find((item) => item.kind === 'search');
   const selectedTrendResult = chosenSearch && trendResult?.topic === chosenSearch.topic ?
-    { ...trendResult, items: trendResult.items?.filter((item) => item.video_id === new URL(chosenSearch.url).searchParams.get('v')) ?? [] } : trendResult;
-  const trend = summarizeTrend(selectedTrendResult);
+    { ...trendResult, items: trendResult.items?.filter((item) => item.video_id === chosenSearch.video_id) ?? [] } : null;
+  const trend = chosenTrend?.trend_summary ?? summarizeTrend(selectedTrendResult);
   const decorate = (suggestions) => suggestions.map((row) => ({ ...row,
     media_type: plan.scenes.find((scene) => scene.media_id === row.media_id).media_type, trim_end_seconds: row.trim_end_seconds ?? '' }));
   const basicRows = decorate(proposeBasicEdit(plan));
