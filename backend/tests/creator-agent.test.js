@@ -83,9 +83,9 @@ test('Vision Mock retains verified captions when five sampled photos produce sce
     order: index + 1, media_id: item.mediaId, media_type: item.mediaType, start_seconds: index * 6,
     end_seconds: (index + 1) * 6, visual_direction: '확인된 장면', caption_text: index === 0 ? '하늘을 올려다봐요' : '',
   })) }, captions: [
-    { order: 1, start_seconds: 0, end_seconds: 3.5, text: '하늘을 올려다봐요' },
-    { order: 2, start_seconds: 24, end_seconds: 27.5, text: '천천히 걸어가요' },
-    { order: 3, start_seconds: 27.5, end_seconds: 30, text: '장면 5를 소개합니다' },
+    { order: 1, media_id: 'photo-1', start_seconds: 0, end_seconds: 3.5, text: '하늘을 올려다봐요' },
+    { order: 2, media_id: 'photo-5', start_seconds: 24, end_seconds: 27.5, text: '천천히 걸어가요' },
+    { order: 3, media_id: 'photo-5', start_seconds: 27.5, end_seconds: 30, text: '장면 5를 소개합니다' },
   ] };
   let calls = 0;
   const agent = new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () => {
@@ -121,8 +121,8 @@ test('Creator accepts labeled photo/video Mock insights and rejects template cap
       { order: 1, media_id: 'photo', media_type: 'image/jpeg', start_seconds: 0, end_seconds: 4, visual_direction: '길을 보여줍니다.', caption_text: '이 길의 끝에는?' },
       { order: 2, media_id: 'clip', media_type: 'video/mp4', start_seconds: 4, end_seconds: 8, visual_direction: '움직이는 풍경을 보여줍니다.', caption_text: '천천히 바라봅니다' },
     ] }, captions: [
-      { order: 1, start_seconds: 0, end_seconds: 4, text: '이 길의 끝에는?' },
-      { order: 2, start_seconds: 4, end_seconds: 8, text: '천천히 바라봅니다' },
+      { order: 1, media_id: 'photo', start_seconds: 0, end_seconds: 4, text: '이 길의 끝에는?' },
+      { order: 2, media_id: 'clip', start_seconds: 4, end_seconds: 8, text: '천천히 바라봅니다' },
     ] };
   let result = await new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () =>
     ({ available: true, output, usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } }) } }).createPlan({
@@ -134,8 +134,8 @@ test('Creator accepts labeled photo/video Mock insights and rejects template cap
   assert.deepEqual(result.plan.recommended_media_order, ['clip', 'photo']);
   const variable = structuredClone(output);
   variable.captions = [
-    { order: 1, start_seconds: 0.2, end_seconds: 1.8, text: '이 길의 끝에는?' },
-    { order: 2, start_seconds: 2, end_seconds: 3.8, text: '잠깐 멈춰 볼까요?' },
+    { order: 1, media_id: 'photo', start_seconds: 0.2, end_seconds: 1.8, text: '이 길의 끝에는?' },
+    { order: 2, media_id: 'photo', start_seconds: 2, end_seconds: 3.8, text: '잠깐 멈춰 볼까요?' },
   ];
   const variableResult = await new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () =>
     ({ available: true, output: variable, usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } }) } }).createPlan({

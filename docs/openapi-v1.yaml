@@ -864,6 +864,25 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Error' }
+  /media/{media_id}/image-preview:
+    get:
+      tags: [Media]
+      operationId: getOwnedImagePreview
+      summary: Show an owned selected image in the local scene editor
+      description: Bearer or same-origin HttpOnly web session required. The uploaded source bytes stay on the local PC and are returned with private no-store and nosniff headers. Videos have no preview on this route.
+      parameters:
+        - $ref: '#/components/parameters/MediaId'
+      responses:
+        '200':
+          description: Owned JPEG, PNG or WebP bytes for local display
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Error' }
   /content/projects:
     get:
       tags: [Projects]
@@ -1999,8 +2018,10 @@ components:
             additionalProperties: false
             required: [media_id, duration_seconds]
             properties:
+              scene_id: { type: string, format: uuid, description: Existing stable scene identifier; omit for a new scene reusing selected project media. }
               media_id: { type: string, format: uuid }
               duration_seconds: { type: number, minimum: 0.1, maximum: 59 }
+              visual_description: { type: string, maxLength: 500, description: User supplied description of what is actually visible; saved with a new content version. }
               trim_start_seconds: { type: number, minimum: 0, maximum: 3600, description: Video only; seek from this source position before rendering. }
               trim_end_seconds: { type: number, minimum: 0, maximum: 3600, description: Optional video source end position. Must leave at least duration_seconds after trim_start_seconds. }
               framing: { type: string, enum: [inherit, fit_pad, fill_crop, blur_pad] }
@@ -2101,9 +2122,12 @@ components:
             additionalProperties: false
             required: [order, media_id, media_type, start_seconds, end_seconds, visual_direction, caption_text]
             properties:
+              scene_id: { type: string, format: uuid, description: Stable ID of this edit scene; legacy projects may not contain it until edited. }
               order: { type: integer, minimum: 1 }
               media_id: { type: string, format: uuid }
               media_type: { type: string, enum: [image/jpeg, image/png, image/webp, video/mp4, video/quicktime] }
+              visual_description: { type: string, maxLength: 500 }
+              visual_analysis_status: { type: string, enum: [unavailable, ai_unverified, user_described] }
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
               trim_start_seconds: { type: number, minimum: 0, maximum: 3600 }
@@ -2226,6 +2250,10 @@ components:
             required: [order, start_seconds, end_seconds, text]
             properties:
               order: { type: integer, minimum: 1 }
+              scene_id: { type: string, format: uuid }
+              media_id: { type: string, format: uuid }
+              caption_source: { type: string, enum: [vision, user, legacy_review] }
+              caption_status: { type: string, enum: [needs_review] }
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
               text: { type: string, maxLength: 80 }
@@ -2263,6 +2291,10 @@ components:
             required: [order, start_seconds, end_seconds, text]
             properties:
               order: { type: integer, minimum: 1, description: Must match its one-based array position. }
+              scene_id: { type: string, format: uuid, description: If present must match the scene containing this caption interval. }
+              media_id: { type: string, format: uuid, description: If present must match the scene source media. }
+              caption_source: { type: string, enum: [vision, user, legacy_review], description: Readback metadata; edits are stored as user captions. }
+              caption_status: { type: string, enum: [needs_review], description: Readback metadata; draft approval is the user review checkpoint. }
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59, description: Must be after start and at most the project duration. }
               text: { type: string, maxLength: 80, description: 'Korean, supported ASCII and selected punctuation; control characters and unsupported glyphs are rejected.' }

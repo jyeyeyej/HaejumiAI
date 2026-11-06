@@ -133,6 +133,20 @@ test('auth is required before private API routes', async (t) => {
   assert.equal((await response.json()).error.code, 'AUTHENTICATION_REQUIRED');
 });
 
+test('scene image previews require owner auth and preserve source bytes', async (t) => {
+  const { base } = await fixture(t);
+  const { mediaId } = await prepareUnapprovedProject(base, 9011);
+  const path = `${base}/media/${mediaId}/image-preview`;
+  assert.equal((await fetch(path)).status, 401);
+  assert.equal((await fetch(path, { headers: headers(tokenB) })).status, 404);
+  const response = await fetch(path, { headers: headers() });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(response.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), png);
+});
+
 test('project list is authenticated, owner-scoped, and uses the shared server state', async (t) => {
   const { base, repositories } = await fixture(t);
   const first = await prepareUnapprovedProject(base, 9111);

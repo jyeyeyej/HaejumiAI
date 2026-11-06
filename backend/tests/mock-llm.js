@@ -19,7 +19,7 @@ export function createMockLLMProvider() {
         recommended_media_order: input.media.map((media) => media.media_id),
         media_insights: input.media.map((media) => ({ media_id: media.media_id, description: '합성 테스트 미디어입니다.', mood: '밝음',
           subjects: [], usable_detail: '색상과 구도', uncertainty: '', category: 'unknown', orientation: 'unknown' })), scenes },
-        captions: scenes.map(({ order, start_seconds, end_seconds, caption_text }) => ({ order, start_seconds, end_seconds, text: caption_text })) };
+        captions: scenes.map(({ order, media_id, start_seconds, end_seconds, caption_text }) => ({ order, media_id, start_seconds, end_seconds, text: caption_text })) };
     },
   };
   return provider;

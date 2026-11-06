@@ -378,6 +378,14 @@ export class LocalRepositories {
     return media?.ownerId === ownerId ? media : null;
   }
 
+  getOwnedImagePreview(ownerId, mediaId) {
+    const media = this.getOwnedMedia(ownerId, mediaId);
+    if (!media || !['image/jpeg', 'image/png', 'image/webp'].includes(media.mediaType) || media.status !== 'available') return null;
+    const bytes = readRegularFile(safeStoragePath(this.blobDir, media.storageKey));
+    if (sha256(bytes) !== media.sha256) throw apiError(409, 'VERSION_CONFLICT', '원본 미디어 무결성을 확인할 수 없습니다.');
+    return { bytes, mediaType: media.mediaType };
+  }
+
   listStyleReferences(ownerId, taskId) {
     const task = this.state.data.tasks[taskId];
     const project = task && this.state.data.projects[task.project_id];
@@ -679,7 +687,7 @@ export class LocalRepositories {
           r.platforms.some((p) => !['youtube', 'instagram', 'tiktok'].includes(p)) || typeof r.evidence !== 'string' || r.evidence.length > 4000 ||
           typeof r.attribution_required !== 'boolean' || typeof r.required_attribution !== 'string' || r.required_attribution.length > 2000 ||
           (r.explicitly_verified && (!r.commercial_allowed || !r.platforms.length || !r.evidence.trim() || (r.attribution_required && !r.required_attribution.trim())))) ||
-        input.captions.some((c) => !c || Object.keys(c).some((k) => !['order', 'start_seconds', 'end_seconds', 'text'].includes(k))) ||
+        input.captions.some((c) => !c || Object.keys(c).some((k) => !['order', 'scene_id', 'media_id', 'caption_source', 'caption_status', 'start_seconds', 'end_seconds', 'text'].includes(k))) ||
         !validCaptionTimeline(input.captions, project.creator_plan?.scenes, project.target_seconds, project.plan_request ?? '')) {
       throw apiError(422, 'VALIDATION_ERROR', '자막 또는 오디오 설정을 확인해 주세요.');
     }
@@ -692,8 +700,9 @@ export class LocalRepositories {
     if (!planApproval || this.state.data.approvals[planApproval.approval_id]?.status !== 'active') throw apiError(409, 'INVALID_STATE_TRANSITION', '현재 기획을 먼저 승인해 주세요.');
     if (input.music_track_id) this.musicLibrary.path(ownerId, input.music_track_id);
     let reuse = null;
+    const captionTiming = (rows) => rows.map(({ order, start_seconds, end_seconds, text }) => ({ order, start_seconds, end_seconds, text }));
     const sameVideo = project.composition && project.composition.captions_enabled === input.captions_enabled &&
-      JSON.stringify(project.caption_draft ?? []) === JSON.stringify(input.captions);
+      JSON.stringify(captionTiming(project.caption_draft ?? [])) === JSON.stringify(captionTiming(input.captions));
     if (sameVideo) {
       const previous = Object.values(this.state.data.jobs).filter((job) => job.task_id === taskId && job.content_version === task.current_version && job.content_hash === task.content_hash &&
         job.status === 'succeeded' && job.renderer_mode === 'ffmpeg' && job.artifact_verified === true && typeof job.artifact_key === 'string' && /^[a-f\d]{64}$/.test(job.artifact_sha256 ?? '')).at(-1);
@@ -701,7 +710,11 @@ export class LocalRepositories {
         try { if (sha256(readRegularFile(safeStoragePath(this.renderDir, previous.artifact_key))) === previous.artifact_sha256) reuse = { artifact_key: previous.artifact_key, sha256: previous.artifact_sha256 }; } catch { /* Re-render instead of trusting a missing or changed cache. */ }
       }
     }
-    const updatedProject = { ...project, caption_draft: structuredClone(input.captions),
+    const linkedCaptions = input.captions.map((caption) => {
+      const scene = captionScene(caption, project.creator_plan?.scenes);
+      return { ...caption, ...(scene ? { scene_id: scene.scene_id, media_id: scene.media_id } : {}), caption_source: 'user', caption_status: 'needs_review' };
+    });
+    const updatedProject = { ...project, caption_draft: linkedCaptions,
       composition: { ...Object.fromEntries(keys.slice(3, 9).map((keyName) => [keyName, input[keyName]])), source_audio_rights: structuredClone(sourceRights) }, current_version: task.current_version + 1 };
     if (reuse) updatedProject.video_reuse = reuse; else delete updatedProject.video_reuse;
     updatedProject.content_hash = this.contentHash(updatedProject);
@@ -746,8 +759,10 @@ export class LocalRepositories {
             !Number.isInteger(input.trend_query.days) || input.trend_query.days < 1 || input.trend_query.days > 90 ||
             (input.trend_query.video_id !== undefined && !/^[A-Za-z0-9_-]{11}$/.test(input.trend_query.video_id)))) ||
         !Number.isSafeInteger(input.content_version) || typeof input.content_hash !== 'string' || !Array.isArray(input.scenes) ||
-        input.scenes.length !== project.media_ids.length || new Set(input.scenes.map((scene) => scene?.media_id)).size !== project.media_ids.length ||
-        input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['media_id', 'duration_seconds', 'trim_start_seconds', 'trim_end_seconds', 'framing', 'motion', 'transition', 'subtitle_style', 'edit_style', 'bgm_mood', 'edit_reason'].includes(key)) ||
+        input.scenes.length < 1 || input.scenes.length > 30 ||
+        input.scenes.some((scene) => !scene || Object.keys(scene).some((key) => !['scene_id', 'media_id', 'duration_seconds', 'trim_start_seconds', 'trim_end_seconds', 'visual_description', 'framing', 'motion', 'transition', 'subtitle_style', 'edit_style', 'bgm_mood', 'edit_reason'].includes(key)) ||
+          (scene.scene_id !== undefined && !isUuid(scene.scene_id)) ||
+          (scene.visual_description !== undefined && (typeof scene.visual_description !== 'string' || scene.visual_description.length > 500)) ||
           !validSceneEffects(scene) ||
           !project.media_ids.includes(scene.media_id) || !Number.isFinite(scene.duration_seconds) || scene.duration_seconds < 0.1 ||
           (scene.trim_start_seconds !== undefined && (!['video/mp4', 'video/quicktime'].includes(this.state.data.media[scene.media_id]?.mediaType) ||
@@ -755,7 +770,8 @@ export class LocalRepositories {
           (scene.trim_end_seconds !== undefined && (!['video/mp4', 'video/quicktime'].includes(this.state.data.media[scene.media_id]?.mediaType) ||
             !Number.isFinite(scene.trim_end_seconds) || scene.trim_end_seconds > 3600 ||
             scene.trim_end_seconds - (scene.trim_start_seconds ?? 0) + 0.001 < scene.duration_seconds))) ||
-        Math.abs(input.scenes.reduce((sum, scene) => sum + scene.duration_seconds, 0) - project.target_seconds) > 0.01) {
+        Math.abs(input.scenes.reduce((sum, scene) => sum + scene.duration_seconds, 0) - project.target_seconds) > 0.01 ||
+        new Set(input.scenes.filter((scene) => scene?.scene_id).map((scene) => scene.scene_id)).size !== input.scenes.filter((scene) => scene?.scene_id).length) {
       throw apiError(422, 'VALIDATION_ERROR', '장면 순서와 길이를 확인해 주세요.');
     }
     const key = `${ownerId}:scene-edit:${taskId}:${idempotencyKey}`;
@@ -767,26 +783,48 @@ export class LocalRepositories {
     const trendReference = input.trend_query ? summarizeTrend(selectedTrend) : null;
     if (input.trend_query && (!trendReference || trendReference.topic !== input.trend_query.topic ||
         trendReference.period_days !== input.trend_query.days)) throw apiError(409, 'TREND_CACHE_MISSING', '최근 검색 결과가 만료되었거나 관련성이 낮습니다. 검색 후 다시 확인해 주세요.');
-    const previous = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id, scene]));
-    const captions = new Map(project.creator_plan.scenes.map((scene) => [scene.media_id,
+    const previous = new Map(project.creator_plan.scenes.map((scene) => [scene.scene_id ?? scene.media_id, scene]));
+    const captions = new Map(project.creator_plan.scenes.map((scene) => [scene.scene_id ?? scene.media_id,
       (project.caption_draft ?? []).filter((caption) => captionScene(caption, [scene]))]));
+    const firstSceneByMedia = new Map();
+    for (const scene of project.creator_plan.scenes) if (!firstSceneByMedia.has(scene.media_id)) firstSceneByMedia.set(scene.media_id, scene);
+    const reservedSceneIds = new Set(input.scenes.map((scene) => scene.scene_id).filter(Boolean));
+    const usedLegacy = new Set();
     let start = 0;
     const scenes = input.scenes.map((item, index) => {
       const end = index === input.scenes.length - 1 ? project.target_seconds : Math.round((start + item.duration_seconds) * 100) / 100;
-      const scene = { ...previous.get(item.media_id), order: index + 1, start_seconds: start, end_seconds: end };
+      let identity = item.scene_id;
+      if (!identity && firstSceneByMedia.has(item.media_id) && !usedLegacy.has(item.media_id) &&
+          !reservedSceneIds.has(firstSceneByMedia.get(item.media_id).scene_id ?? item.media_id)) {
+        const matched = firstSceneByMedia.get(item.media_id);
+        identity = matched.scene_id ?? matched.media_id; usedLegacy.add(item.media_id);
+      }
+      const priorScene = identity ? previous.get(identity) : null;
+      if (priorScene && priorScene.media_id !== item.media_id) throw apiError(422, 'VALIDATION_ERROR', '장면 ID와 원본 미디어가 일치하지 않습니다.');
+      if (identity && !priorScene) throw apiError(422, 'VALIDATION_ERROR', '프로젝트에 없는 장면 ID입니다.');
+      if (priorScene) usedLegacy.add(item.media_id);
+      const sourceMedia = this.state.data.media[item.media_id];
+      const scene = { ...(priorScene ?? {}), scene_id: priorScene?.scene_id ?? identity ?? randomUUID(),
+        media_id: item.media_id, media_type: sourceMedia.mediaType, order: index + 1, start_seconds: start, end_seconds: end,
+        visual_direction: priorScene?.visual_direction ?? '이 미디어의 내용을 확인해 주세요.', caption_text: priorScene?.caption_text ?? '' };
+      if (item.visual_description !== undefined) {
+        scene.visual_description = item.visual_description;
+        scene.visual_analysis_status = item.visual_description.trim() ?
+          (priorScene?.visual_description === item.visual_description ? priorScene.visual_analysis_status ?? 'unavailable' : 'user_described') : 'unavailable';
+      }
       for (const field of ['framing', 'motion', 'transition', 'subtitle_style', 'edit_style', 'bgm_mood', 'edit_reason']) if (item[field] !== undefined) scene[field] = item[field];
       if (item.trim_start_seconds !== undefined) scene.trim_start_seconds = item.trim_start_seconds; else delete scene.trim_start_seconds;
       if (item.trim_end_seconds !== undefined) scene.trim_end_seconds = item.trim_end_seconds; else delete scene.trim_end_seconds;
       start = end; return scene;
     });
-    project.media_ids = input.scenes.map((scene) => scene.media_id);
+    project.media_ids = [...new Set([...scenes.map((scene) => scene.media_id), ...project.media_ids])];
     project.media_manifest = project.media_ids.map((mediaId, index) => ({ order: index + 1, media_id: mediaId, sha256: this.state.data.media[mediaId].sha256 }));
     project.creator_plan.scenes = scenes;
     if (Array.isArray(project.creator_plan.media_insights)) {
       const insightById = new Map(project.creator_plan.media_insights.map((insight) => [insight.media_id, insight]));
       project.creator_plan.media_insights = project.media_ids.map((mediaId) => insightById.get(mediaId)).filter(Boolean);
     }
-    project.creator_plan.recommended_media_order = [...project.media_ids];
+    project.creator_plan.recommended_media_order = [...new Set(scenes.map((scene) => scene.media_id))];
     if (input.trend_query === null) delete project.creator_plan.trend_reference;
     else if (trendReference) project.creator_plan.trend_reference = trendReference;
     if (input.reference_ids) {
@@ -794,8 +832,9 @@ export class LocalRepositories {
       project.creator_plan.style_references = selectedStyleReferences(project, input.reference_ids);
     }
     project.caption_draft = scenes.flatMap((scene) => {
-      const original = previous.get(scene.media_id);
-      return (captions.get(scene.media_id) ?? []).map((caption) => ({
+      const original = previous.get(scene.scene_id);
+      return (captions.get(scene.scene_id) ?? []).map((caption) => ({
+        scene_id: scene.scene_id, media_id: scene.media_id, caption_source: caption.caption_source ?? 'legacy_review', caption_status: 'needs_review',
         start_seconds: Math.round((scene.start_seconds + (caption.start_seconds - original.start_seconds) * (scene.end_seconds - scene.start_seconds) / (original.end_seconds - original.start_seconds)) * 100) / 100,
         end_seconds: Math.round((scene.start_seconds + (caption.end_seconds - original.start_seconds) * (scene.end_seconds - scene.start_seconds) / (original.end_seconds - original.start_seconds)) * 100) / 100,
         text: caption.text }));
@@ -1197,7 +1236,8 @@ export class LocalRepositories {
       project.target_seconds, project.plan_request ?? '')) {
       throw apiError(422, 'VALIDATION_ERROR', '기존 자막에 임시 문구·기획 지시문 또는 장면과 맞지 않는 시간이 있습니다. 자막을 수정하고 다시 승인해 주세요.');
     }
-    const mediaItems = project.media_ids.map((id) => this.state.data.media[id]);
+    const mediaItems = project.creator_plan?.scenes?.length ? project.creator_plan.scenes.map((scene) => this.state.data.media[scene.media_id]) :
+      project.media_ids.map((id) => this.state.data.media[id]);
     if (mediaItems.some((item) => !item || item.ownerId !== ownerId || item.status !== 'available' || !item.storageKey)) throw apiError(404, 'RESOURCE_NOT_FOUND', '승인된 프로젝트 미디어를 찾을 수 없습니다.');
     const job = { job_id: randomUUID(), task_id: taskId, owner_id: ownerId, kind: 'render', status: 'queued', progress_percent: 0,
       content_version: task.current_version, content_hash: task.content_hash, created_at: new Date().toISOString(), ...settings };
@@ -1218,7 +1258,8 @@ export class LocalRepositories {
     if (!task || !project || task.ownerId !== job.owner_id || task.active_job_id !== jobId || task.current_version !== job.content_version || task.content_hash !== job.content_hash) {
       this.failRenderJob(jobId, 'VERSION_CONFLICT'); return null;
     }
-    const mediaItems = project.media_ids.map((id) => this.state.data.media[id]);
+    const mediaItems = project.creator_plan?.scenes?.length ? project.creator_plan.scenes.map((scene) => this.state.data.media[scene.media_id]) :
+      project.media_ids.map((id) => this.state.data.media[id]);
     const invalidMedia = mediaItems.some((item) => {
       if (!item || item.ownerId !== job.owner_id || item.status !== 'available' || !item.storageKey) return true;
       try { return sha256(readRegularFile(safeStoragePath(this.blobDir, item.storageKey))) !== item.sha256; }

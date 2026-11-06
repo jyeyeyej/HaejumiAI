@@ -51,6 +51,14 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
         response.setHeader('Set-Cookie', webCookieHeader('', 0, request, webSessions.secureCookie));
         response.writeHead(204, { 'Cache-Control': 'no-store' }); response.end(); return;
       }
+      const imagePreview = /^\/media\/([0-9a-f-]+)\/image-preview$/.exec(path);
+      if (imagePreview && request.method === 'GET') {
+        const preview = repositories.getOwnedImagePreview(principal.ownerId, imagePreview[1]);
+        if (!preview) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
+        response.writeHead(200, { 'Content-Type': preview.mediaType, 'Content-Length': preview.bytes.length,
+          'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+        response.end(preview.bytes); return;
+      }
 
       if (path === '/trends/status' && request.method === 'GET') {
         return sendJson(response, 200, { enabled: Boolean(trends?.enabled), provider: trends?.enabled ? 'youtube_data_api' : null,

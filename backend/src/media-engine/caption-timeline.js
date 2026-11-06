@@ -10,7 +10,10 @@ export function validCaptionText(text, requestText = '') {
 }
 
 export function captionScene(caption, scenes) {
-  return scenes?.find((scene) => caption.start_seconds >= scene.start_seconds - 0.001 && caption.end_seconds <= scene.end_seconds + 0.001);
+  return scenes?.find((scene) =>
+    (!caption.scene_id || scene.scene_id === caption.scene_id) &&
+    (!caption.media_id || scene.media_id === caption.media_id) &&
+    caption.start_seconds >= scene.start_seconds - 0.001 && caption.end_seconds <= scene.end_seconds + 0.001);
 }
 
 export function validCaptionTimeline(captions, scenes, duration, requestText = '') {

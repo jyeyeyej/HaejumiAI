@@ -45,6 +45,42 @@ test('real FFmpeg applies landscape blur padding, image zoom/pan, fade and Korea
   assert.ok(brightness(fadeStart) < brightness(fadeMiddle), 'fade should brighten after the scene begins');
 });
 
+test('scene-bound Korean captions appear only within their approved scene intervals in a real MP4', { skip: !available, timeout: 120000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'haejumi-scene-caption-real-'));
+  t.after(() => { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true }); });
+  const mediaRoot = join(root, 'media'); const outputRoot = join(root, 'out'); mkdirSync(mediaRoot); mkdirSync(outputRoot);
+  const ff = (...args) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  for (const [name, color] of [['game.jpg', 'red'], ['food.jpg', 'blue']]) {
+    ff('-f', 'lavfi', '-i', `color=c=${color}:s=360x640`, '-frames:v', '1', join(mediaRoot, name));
+  }
+  const ids = [randomUUID(), randomUUID()]; const sceneIds = [randomUUID(), randomUUID()];
+  const mediaItems = ids.map((mediaId, index) => ({ mediaId, mediaType: 'image/jpeg', fileName: index ? 'food.jpg' : 'game.jpg', storageKey: index ? 'food.jpg' : 'game.jpg' }));
+  const scenes = ids.map((mediaId, index) => ({ scene_id: sceneIds[index], media_id: mediaId, order: index + 1,
+    start_seconds: index * 2, end_seconds: index * 2 + 2, framing: 'fit_pad', motion: 'static', transition: 'cut', subtitle_style: 'default' }));
+  const captions = [
+    { order: 1, scene_id: sceneIds[0], media_id: ids[0], start_seconds: 0.3, end_seconds: 1.4, text: '친구들과 게임 한 판' },
+    { order: 2, scene_id: sceneIds[1], media_id: ids[1], start_seconds: 2.3, end_seconds: 3.4, text: '함께 준비한 음식' },
+  ];
+  const renderer = createFFmpegRenderer({ mediaRoot, outputRoot });
+  const withCaptions = await renderer.render({ mediaItems, scenes, captions, targetSeconds: 4, projectId: randomUUID(), version: 1 });
+  const baseline = await renderer.render({ mediaItems, scenes, captions: [], targetSeconds: 4, projectId: randomUUID(), version: 1 });
+  assert.equal(withCaptions.verified, true);
+  assert.equal(withCaptions.verification.video_codec, 'h264');
+  assert.equal(withCaptions.verification.audio_codec, 'aac');
+  const frame = (file, time) => ff('-ss', String(time), '-i', file, '-frames:v', '1', '-vf', 'scale=90:160', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1');
+  const meanDifference = (a, b) => a.reduce((sum, value, index) => sum + Math.abs(value - b[index]), 0) / a.length;
+  for (const time of [0.8, 2.8]) {
+    const difference = meanDifference(frame(withCaptions.output_path, time), frame(baseline.output_path, time));
+    assert.ok(difference > 0.1, `caption must be visible at ${time}s: mean difference ${difference}`);
+  }
+  for (const time of [1.8, 2.1, 3.8]) {
+    const difference = meanDifference(frame(withCaptions.output_path, time), frame(baseline.output_path, time));
+    assert.ok(difference < 0.3, `caption must not leak at ${time}s: mean difference ${difference}`);
+  }
+  const beforeCut = frame(withCaptions.output_path, 1.8); const afterCut = frame(withCaptions.output_path, 2.1);
+  assert.notDeepEqual(beforeCut, afterCut, 'the scene source changes at the cut');
+});
+
 test('mock trend plus Vision mixed edit renders synthetic photos and video with verified FFmpeg effects', { skip: !available, timeout: 120000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'haejumi-trend-render-'));
   t.after(() => { assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep)); rmSync(root, { recursive: true, force: true }); });

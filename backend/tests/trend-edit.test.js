@@ -9,6 +9,8 @@ import { JsonState } from '../src/adapters/filesystem/json-state.js';
 import { LocalRepositories } from '../src/adapters/filesystem/repositories.js';
 import { createApiHandler } from '../src/adapters/node-http/transport.js';
 import { CreatorAgent } from '../src/agents/creator-agent.js';
+import { validCaptionTimeline } from '../src/media-engine/caption-timeline.js';
+import { createMockLLMProvider } from './mock-llm.js';
 import { proposeBasicEdit, proposeMixedEdit, hasVisibleEditDifference, summarizeTrend } from '../../shared/trend-edit.js';
 
 const NOW = new Date('2026-11-04T12:00:00.000Z');
@@ -100,4 +102,70 @@ test('cached trend provenance is stored with scene edit and version invalidation
   assert.deepEqual(edited.plan.media_insights.map((insight) => insight.media_id), [...ids].reverse());
   assert.ok(repo.getOwnedCheckpoints(owner, project.task_id).some((item) => item.status === 'invalidated'));
   assert.equal(repo.getOwnedCreatorPlan(owner, project.task_id).plan.trend_reference.topic, 'travel');
+});
+
+test('captions stay with scene IDs across reorder, duration change, reuse and removal', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'haejumi-scene-caption-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = new JsonState(join(dir, 'state.json'));
+  const repo = new LocalRepositories({ state, dataDir: dir, maxMediaBytes: 1024 * 1024 });
+  const owner = 'synthetic-owner';
+  const ids = [randomUUID(), randomUUID(), randomUUID()];
+  const words = ['게임하는 돗자리', '컵라면과 음료', '노을이 비친 강'];
+  ids.forEach((mediaId) => { state.data.media[mediaId] = { mediaId, mediaType: 'image/jpeg', ownerId: owner,
+    status: 'available', sha256: 'a'.repeat(64) }; });
+  const created = repo.createForOwner(owner, { media_ids: ids, target_seconds: 6 }, randomUUID());
+  const project = state.data.projects[created.project_id];
+  const task = state.data.tasks[created.task_id];
+  const scenes = ids.map((mediaId, index) => ({ scene_id: randomUUID(), media_id: mediaId, media_type: 'image/jpeg',
+    order: index + 1, start_seconds: index * 2, end_seconds: index * 2 + 2, visual_direction: words[index],
+    visual_description: words[index], visual_analysis_status: 'user_described', caption_text: '' }));
+  project.creator_plan = { scenes, media_insights: ids.map((media_id) => ({ media_id })) };
+  project.caption_draft = scenes.map((scene, index) => ({ order: index + 1, scene_id: scene.scene_id, media_id: scene.media_id,
+    start_seconds: scene.start_seconds, end_seconds: scene.end_seconds, text: words[index], caption_source: 'user' }));
+  task.content_hash = project.content_hash = repo.contentHash(project);
+  const edit = (ordered, durations) => repo.updateCreatorScenes(owner, created.task_id, {
+    content_version: task.current_version, content_hash: task.content_hash,
+    scenes: ordered.map((scene, index) => ({ ...(scene.scene_id ? { scene_id: scene.scene_id } : {}),
+      media_id: scene.media_id, duration_seconds: durations[index], visual_description: scene.visual_description ?? '' })),
+  }, randomUUID());
+  const reordered = edit([scenes[1], scenes[0], scenes[2]], [1, 3, 2]);
+  assert.deepEqual(reordered.plan.scenes.map((scene) => scene.scene_id), [scenes[1].scene_id, scenes[0].scene_id, scenes[2].scene_id]);
+  assert.deepEqual(project.caption_draft.map((caption) => caption.text), [words[1], words[0], words[2]]);
+  assert.deepEqual(project.caption_draft.map((caption) => [caption.start_seconds, caption.end_seconds]), [[0, 1], [1, 4], [4, 6]]);
+  assert.equal(validCaptionTimeline(project.caption_draft, project.creator_plan.scenes, 6), true);
+  assert.equal(validCaptionTimeline([{ ...project.caption_draft[0], scene_id: scenes[0].scene_id }], project.creator_plan.scenes, 6), false);
+  const repeated = edit([reordered.plan.scenes[0], { media_id: ids[1] }, reordered.plan.scenes[1], reordered.plan.scenes[2]], [1, 1, 2, 2]);
+  assert.equal(repeated.plan.scenes[1].media_id, ids[1]);
+  assert.notEqual(repeated.plan.scenes[1].scene_id, repeated.plan.scenes[0].scene_id);
+  assert.equal(project.caption_draft.filter((caption) => caption.media_id === ids[1]).length, 1, 'new scene must not copy an existing caption');
+  const removed = edit([repeated.plan.scenes[1], repeated.plan.scenes[2], repeated.plan.scenes[3]], [2, 2, 2]);
+  assert.equal(removed.plan.scenes.some((scene) => scene.scene_id === scenes[1].scene_id), false);
+  assert.equal(project.caption_draft.some((caption) => caption.scene_id === scenes[1].scene_id), false);
+  assert.deepEqual(project.media_ids.sort(), [...ids].sort(), 'source media remains in the project after scene removal');
+});
+
+test('Vision captions with a different media ID are never attached by matching timestamps', async () => {
+  const provider = createMockLLMProvider();
+  const media = [randomUUID(), randomUUID()].map((mediaId) => ({ mediaId, mediaType: 'image/jpeg', imageDataUrl: 'data:image/jpeg;base64,AA==' }));
+  const project = { target_seconds: 6 };
+  const original = provider.generateStructured.bind(provider);
+  const gateway = { enabled: true, provider, async generate({ input }) {
+    const output = await provider.generateStructured({ input });
+    return { available: true, output, usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } };
+  } };
+  const agent = new CreatorAgent({ gateway });
+  const valid = await agent.createPlan({ ownerId: 'synthetic', taskId: randomUUID(), project, media, requestText: '선택한 사진 쇼츠' });
+  assert.equal(valid.captions.length, 2);
+  assert.deepEqual(valid.captions.map((caption) => caption.media_id), media.map((item) => item.mediaId));
+  gateway.generate = async ({ input }) => {
+    const output = await original({ input });
+    output.plan.scenes.forEach((scene) => { scene.caption_text = ''; });
+    output.captions[0].media_id = media[1].mediaId;
+    output.captions[1].media_id = media[0].mediaId;
+    return { available: true, output, usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } };
+  };
+  const mismatched = await agent.createPlan({ ownerId: 'synthetic', taskId: randomUUID(), project, media, requestText: '선택한 사진 쇼츠' });
+  assert.equal(mismatched.generation.source, 'local_rules');
+  assert.deepEqual(mismatched.captions, []);
 });

@@ -221,6 +221,7 @@ Publishing uncertainty: publishing → outcome_unknown → reconciling
 공개범위 enum을 플랫폼 별 공식 API 값에 매핑하는 방법, 플랫폼별 제목/설명/해시태그 길이 제한, 계정 ID 연결/검증은 `[검증 필요]`입니다. 현재 공통값은 제안이며 게시 실행 허가가 아닙니다.
 
 ## 승인 필요 항목
+- [참조 구현·정식 계약 검토 필요] JSON Creator의 장면 편집은 기존 선택 미디어를 `scene_id`별로 재배치·재사용·제외할 수 있고, 자막은 `scene_id`·`media_id` 및 시간 경계를 함께 검증합니다. 레거시 ID 없는 자막은 시간 연결을 유지하되 사용자 검토가 필요합니다. `GET /media/{media_id}/image-preview`는 소유자 인증된 로컬 사진 표시용입니다. 세부 필드와 응답은 `docs/openapi-v1.yaml`을 참조하며 정식 API 계약 확정은 별도입니다.
 - 인증 방식·초기 사용자 등록/복구, 세션 수명, LAN HTTPS/Tailscale 경계.
 - 업로드 크기/형식/청크 전송과 재개 방식, manifest canonicalization 및 해시 범위.
 - 외부 처리 동의의 UI·만료·철회 시점, 공급자/목적별 세부 범위와 기존 작업 처리.

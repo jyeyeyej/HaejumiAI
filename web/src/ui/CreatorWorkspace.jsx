@@ -295,7 +295,8 @@ function PublicationEditor({ api, taskId, task, job, platform, publication, sugg
 }
 
 function PlanSceneEditor({ api, taskId, task, plan, generation, trendResult, references, selectedReferenceIds, planApproval, draftApproval, busy, run, keyFor }) {
-  const initialRows = () => plan.scenes.map((scene) => ({ media_id: scene.media_id, media_type: scene.media_type,
+  const initialRows = () => plan.scenes.map((scene) => ({ scene_id: scene.scene_id ?? scene.media_id, media_id: scene.media_id, media_type: scene.media_type,
+    visual_description: scene.visual_description ?? '', visual_analysis_status: scene.visual_analysis_status ?? 'unavailable',
     duration_seconds: Number((scene.end_seconds - scene.start_seconds).toFixed(2)), trim_start_seconds: scene.trim_start_seconds ?? 0,
     trim_end_seconds: scene.trim_end_seconds ?? '', framing: scene.framing ?? 'inherit', motion: scene.motion ?? 'static',
     transition: scene.transition ?? 'cut', subtitle_style: scene.subtitle_style ?? 'default', edit_style: scene.edit_style ?? 'basic',
@@ -309,19 +310,26 @@ function PlanSceneEditor({ api, taskId, task, plan, generation, trendResult, ref
     { ...trendResult, items: trendResult.items?.filter((item) => item.video_id === chosenSearch.video_id) ?? [] } : null;
   const trend = chosenTrend?.trend_summary ?? summarizeTrend(selectedTrendResult);
   const decorate = (suggestions) => suggestions.map((row) => ({ ...row,
+    scene_id: row.scene_id ?? plan.scenes.find((scene) => scene.media_id === row.media_id)?.scene_id ?? row.media_id,
+    visual_description: row.visual_description ?? plan.scenes.find((scene) => scene.media_id === row.media_id)?.visual_description ?? '',
+    visual_analysis_status: row.visual_analysis_status ?? plan.scenes.find((scene) => scene.media_id === row.media_id)?.visual_analysis_status ?? 'unavailable',
     media_type: plan.scenes.find((scene) => scene.media_id === row.media_id).media_type, trim_end_seconds: row.trim_end_seconds ?? '' }));
   const basicRows = decorate(proposeBasicEdit(plan));
   const proposedRows = decorate(proposeReferenceEdit(plan, generation, trend, references));
   const hasVisualChange = hasVisibleEditDifference(basicRows, proposedRows);
   const total = Math.round(rows.reduce((sum, row) => sum + Number(row.duration_seconds || 0), 0) * 100) / 100;
-  const set = (index, field, value) => { setEdited(true); setRows((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row)); };
+  const set = (index, field, value) => { setEdited(true); setRows((current) => current.map((row, rowIndex) => rowIndex === index ?
+    { ...row, [field]: value, ...(field === 'visual_description' ? { visual_analysis_status: value.trim() ? 'user_described' : 'unavailable' } : {}) } : row)); };
   const move = (index, delta) => { setEdited(true); setRows((current) => { const next = [...current]; [next[index], next[index + delta]] = [next[index + delta], next[index]]; return next; }); };
-  const payload = rows.map((row) => ({ media_id: row.media_id, duration_seconds: Number(row.duration_seconds), framing: row.framing,
+  const duplicate = (index) => { setEdited(true); setRows((current) => { const next = [...current]; const { scene_id: _oldId, ...copy } = next[index]; next.splice(index + 1, 0, { ...copy, duration_seconds: 0.1 }); return next; }); };
+  const remove = (index) => { setEdited(true); setRows((current) => current.filter((_, i) => i !== index)); };
+  const payload = rows.map((row) => ({ ...(row.scene_id ? { scene_id: row.scene_id } : {}), media_id: row.media_id,
+    visual_description: row.visual_description, duration_seconds: Number(row.duration_seconds), framing: row.framing,
     motion: row.motion, transition: row.transition, subtitle_style: row.subtitle_style, edit_style: row.edit_style,
     bgm_mood: row.bgm_mood, edit_reason: row.edit_reason,
     ...(row.media_type.startsWith('video/') ? { trim_start_seconds: Number(row.trim_start_seconds),
       ...(row.trim_end_seconds === '' ? {} : { trim_end_seconds: Number(row.trim_end_seconds) }) } : {}) }));
-  const valid = Math.abs(total - plan.target_seconds) <= 0.01 && payload.every((row) => row.duration_seconds >= 0.1 && Number.isFinite(row.duration_seconds) &&
+  const valid = rows.length > 0 && rows.length <= 30 && Math.abs(total - plan.target_seconds) <= 0.01 && payload.every((row) => row.duration_seconds >= 0.1 && Number.isFinite(row.duration_seconds) &&
     (row.trim_start_seconds === undefined || Number.isFinite(row.trim_start_seconds) && row.trim_start_seconds >= 0 && row.trim_start_seconds <= 3600) &&
     (row.trim_end_seconds === undefined || Number.isFinite(row.trim_end_seconds) && row.trim_end_seconds <= 3600 && row.trim_end_seconds - (row.trim_start_seconds ?? 0) + 0.001 >= row.duration_seconds));
   function applyProposal() {
@@ -340,8 +348,11 @@ function PlanSceneEditor({ api, taskId, task, plan, generation, trendResult, ref
       <div><strong>{trend ? '검색 메타데이터 + Vision 혼합 제안' : 'Vision 기반 로컬 혼합 제안'} · 저장 전</strong><ol>{proposedRows.map((row) => <li key={row.media_id}>미디어 {plan.scenes.findIndex((scene) => scene.media_id === row.media_id) + 1} · {row.duration_seconds}초 · {row.transition === 'fade' ? '페이드' : '컷'} · {editStyleLabel(row.edit_style)} · {row.motion} · {row.subtitle_style === 'emphasis' ? '강조 자막' : row.subtitle_style === 'information' ? '정보형 자막' : '기본 자막'}</li>)}</ol></div></div>
     <p className="muted">이 비교는 편집 설정을 보여줍니다. 현재 저장된 설정은 아래 장면 카드에서 확인하세요. 실제 MP4를 전후 비교하려면 기존 영상을 먼저 내려받고 새 버전을 렌더해 내려받으세요. 이전 버전의 서버 미리보기는 현재 버전 API에서 제공하지 않습니다.</p>
     <p className="muted">{trend ? `검색 사실: ${trend.keywords.join(', ') || '관련 제목'} · ${trend.queried_at} 조회. 검색 메타데이터는 영상 내부 효과의 근거가 아닙니다.` : '유효한 최근 검색 결과가 없습니다.'} {references.some((item) => item.analysis_scope === 'local_video_sample') ? '직접 업로드한 영상은 화면 변화 샘플만 참고합니다.' : '시각 분석이 없는 장면은 기본 효과 또는 사용자가 설명한 분위기를 적용합니다.'} 해주미의 효과는 자체 추천입니다.</p>
-    {rows.map((row, index) => <div className="scene" key={row.media_id}><span className="scene-number">{index + 1}</span><div>
+    {rows.map((row, index) => <div className="scene" key={row.scene_id ?? `new-${index}`}><span className="scene-number">{index + 1}</span><div>
+      {!row.media_type.startsWith('video/') && <img className="scene-thumbnail" src={`/api/v1/media/${row.media_id}/image-preview`} alt={`장면 ${index + 1}의 선택 사진`} loading="lazy" />}
       <small>{row.media_type.startsWith('video/') ? '영상' : '사진'} · {row.media_id.slice(0, 8)}</small>
+      <small>장면 설명: {row.visual_analysis_status === 'ai_unverified' ? 'Vision 제안 · 사용자 확인 필요' : row.visual_analysis_status === 'user_described' ? '사용자 입력' : '시각 내용 미확인'} · 자막의 의미는 초안에서 직접 확인해 주세요.</small>
+      <label>이 장면에 실제로 보이는 내용 (사용자 설명)<textarea rows="2" maxLength="500" value={row.visual_description} onChange={(event) => set(index, 'visual_description', event.target.value)} /></label>
       <label>재생 초 <input type="number" min="0.1" max="59" step="0.01" value={row.duration_seconds} onChange={(event) => set(index, 'duration_seconds', event.target.value)} /></label>
       {row.media_type.startsWith('video/') && <label>시작 위치(초) <input type="number" min="0" max="3600" step="0.01" value={row.trim_start_seconds} onChange={(event) => set(index, 'trim_start_seconds', event.target.value)} /></label>}
       {row.media_type.startsWith('video/') && <label>종료 위치(초, 선택) <input type="number" min="0" max="3600" step="0.01" value={row.trim_end_seconds} onChange={(event) => set(index, 'trim_end_seconds', event.target.value)} /></label>}
@@ -353,7 +364,7 @@ function PlanSceneEditor({ api, taskId, task, plan, generation, trendResult, ref
       <small>추천 편집 스타일: {row.suggested_style === 'highlight' ? '빠른 하이라이트' : row.suggested_style === 'emotional' ? '감성' : row.suggested_style === 'information' ? '정보형' : '기본'} · 자막 문구와 음악은 별도 초안에서 확인해 주세요.</small>
       <small>렌더 적용: 화면 배치·움직임·전환·색감. 자막 분위기는 승인된 자막이 있을 때 적용됩니다. BGM 분위기와 추천 근거는 편집 안내이며 음원 변경은 별도 초안에서 합니다.</small>
       {row.edit_reason && <small>해주미 자체 추천 근거: {row.edit_reason}</small>}
-      <div className="button-row"><button className="secondary" disabled={busy || index === 0} onClick={() => move(index, -1)}>위로</button><button className="secondary" disabled={busy || index === rows.length - 1} onClick={() => move(index, 1)}>아래로</button></div>
+      <div className="button-row"><button className="secondary" disabled={busy || index === 0} onClick={() => move(index, -1)}>위로</button><button className="secondary" disabled={busy || index === rows.length - 1} onClick={() => move(index, 1)}>아래로</button><button className="secondary" disabled={busy || rows.length >= 30} onClick={() => duplicate(index)}>같은 미디어로 장면 추가</button><button className="secondary" disabled={busy || rows.length <= 1} onClick={() => remove(index)}>장면 제외</button></div>
     </div></div>)}
     <button disabled={busy || !valid} onClick={() => run(() => api.updateScenes(taskId, task, payload, keyFor(`scene:${task.current_version}:${JSON.stringify({ payload, trendQuery, selectedReferenceIds })}`), trendQuery, selectedReferenceIds), '새 장면 기획과 레퍼런스가 저장됐습니다. 현재 버전의 승인을 다시 확인해 주세요.')}>장면 구성 저장</button>
   </div>;
@@ -390,25 +401,31 @@ function DraftSection({ api, task, taskId, draft, scenes, generation, tracks, ch
     const start = Number(row.start_seconds); const end = Number(row.end_seconds);
     return String(row.start_seconds).trim() !== '' && String(row.end_seconds).trim() !== '' && Number.isFinite(start) && Number.isFinite(end) && start >= 0 && start < end &&
       (index === 0 || start >= Number(ordered[index - 1].end_seconds)) &&
-      scenes.some((scene) => start >= scene.start_seconds && end <= scene.end_seconds) &&
+      scenes.some((scene) => (!row.scene_id || row.scene_id === (scene.scene_id ?? scene.media_id)) &&
+        (!row.media_id || row.media_id === scene.media_id) && start >= scene.start_seconds && end <= scene.end_seconds) &&
       row.text.trim() && !/장면\s*\d+\s*을\s*소개합니다|장면별\s*효과.*제안/u.test(row.text);
   });
   function save() {
     const body = { content_version: task.current_version, content_hash: task.content_hash,
-      captions: ordered.map((row, index) => ({ order: index + 1, start_seconds: Number(row.start_seconds), end_seconds: Number(row.end_seconds), text: row.text })),
+      captions: ordered.map((row, index) => ({ order: index + 1,
+        ...(row.scene_id ? { scene_id: row.scene_id } : {}), ...(row.media_id ? { media_id: row.media_id } : {}),
+        start_seconds: Number(row.start_seconds), end_seconds: Number(row.end_seconds), text: row.text })),
       captions_enabled: enabled, music_track_id: trackId || null, source_volume: Number(sourceVolume), music_volume: Number(musicVolume),
       fade_in_seconds: Number(fadeIn), fade_out_seconds: Number(fadeOut) };
     run(() => api.updateDraft(taskId, body, keyFor(`draft:${task.current_version}:${JSON.stringify(body)}`)), '자막·음악 변경으로 버전이 올랐습니다. 기획부터 다시 승인해 주세요.');
   }
   return <section className="card workspace-card"><p className="eyebrow">02 · CAPTIONS & MUSIC</p><h2>자막·음악 초안</h2>
-    <p className="muted">장면 안에서 자막의 시작·종료 시간과 문구를 수정하세요. 한 장면에 여러 자막을 넣거나 자막 없이 둘 수 있습니다.</p>
+    <p className="muted">장면 설명과 원본 미디어를 확인하고 자막을 수정하세요. AI가 제안한 문구도 장면과 의미가 맞는지는 직접 확인해야 합니다. 한 장면에 여러 자막을 넣거나 자막 없이 둘 수 있습니다.</p>
     {captions.length === 0 && <p className="warning" role="status">{generation?.source === 'local_rules' ? `${visionGenerationMessage(generation)} 자막 없이 렌더하면 MP4에도 자막이 표시되지 않습니다.`
       : '이 버전에는 영상 자막이 없습니다. 자막 없이 렌더하면 MP4에도 자막이 표시되지 않습니다.'}</p>}
     <label className="check"><input type="checkbox" checked={enabled} onChange={(event) => { setEnabled(event.target.checked); setEdited(true); }} /> 자막 합성</label>
-    <div className="caption-add-actions">{scenes.map((scene) => <button type="button" className="secondary caption-small-button" key={scene.order} disabled={busy || captions.length >= 30} onClick={() => { setCaptions((rows) => [...rows, { start_seconds: scene.start_seconds, end_seconds: scene.end_seconds, text: '' }]); setEdited(true); }}>+ 장면 {scene.order} 자막</button>)}</div>
+    <div className="caption-add-actions">{scenes.map((scene) => <button type="button" className="secondary caption-small-button" key={scene.scene_id ?? scene.order} disabled={busy || captions.length >= 30} onClick={() => { setCaptions((rows) => [...rows, { scene_id: scene.scene_id ?? scene.media_id, media_id: scene.media_id, start_seconds: scene.start_seconds, end_seconds: scene.end_seconds, text: '', caption_source: 'user' }]); setEdited(true); }}>+ 장면 {scene.order} 자막</button>)}</div>
     <div className="caption-cards">{captions.map((row, index) => {
-      const scene = scenes.find((item) => Number(row.start_seconds) >= item.start_seconds && Number(row.end_seconds) <= item.end_seconds);
+      const scene = scenes.find((item) => (!row.scene_id || row.scene_id === (item.scene_id ?? item.media_id)) &&
+        Number(row.start_seconds) >= item.start_seconds && Number(row.end_seconds) <= item.end_seconds);
       return <section key={index} className="caption-edit-card"><div className="caption-card-head"><strong>장면 {scene?.order ?? '시간 확인'} · 자막 {index + 1}</strong><button type="button" className="secondary caption-small-button" onClick={() => { setCaptions((rows) => rows.filter((_, i) => i !== index)); setEdited(true); }}>삭제</button></div>
+        {scene && !scene.media_type.startsWith('video/') && <img className="scene-thumbnail" src={`/api/v1/media/${scene.media_id}/image-preview`} alt={`자막 ${index + 1}에 연결된 사진`} loading="lazy" />}
+        <small>{scene ? `${scene.media_type.startsWith('video/') ? '영상' : '사진'} ${scene.media_id.slice(0, 8)} · ${scene.visual_description || '장면 내용 미확인'}` : '연결할 장면을 확인해 주세요.'} · {row.caption_source === 'vision' ? 'Vision 제안' : row.caption_source === 'user' ? '사용자 수정' : '기존 자막'} · {checkpoint?.status === 'approved' ? '초안 승인됨' : '내용·의미 확인 필요'}</small>
         <div className="caption-time-grid"><label>시작(초)<input type="number" min="0" max={task.target_seconds} step="0.01" value={row.start_seconds} onChange={(event) => changeTime(index, 'start_seconds', event.target.value)} /></label><label>종료(초)<input type="number" min="0" max={task.target_seconds} step="0.01" value={row.end_seconds} onChange={(event) => changeTime(index, 'end_seconds', event.target.value)} /></label></div>
         <label className="caption-text-label">영상 자막<textarea rows="3" value={row.text} maxLength="80" onChange={(event) => changeCaption(index, event.target.value)} /></label>
       </section>;

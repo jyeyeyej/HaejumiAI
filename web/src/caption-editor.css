@@ -16,3 +16,4 @@
 .project-entry.selected{background:#eff7e9;border-color:#b9dbaa}
 .project-entry .project-row{margin:0;border:0;background:transparent;padding-right:78px}
 .project-entry .project-delete{position:absolute;right:10px;top:10px;padding:5px 9px!important;background:#f7e8e5!important;color:#8a4137!important;font-size:.76rem!important}
+.scene-thumbnail{display:block;width:min(100%,180px);aspect-ratio:1;object-fit:cover;border-radius:10px;margin:8px 0;background:#e8f1e9}
