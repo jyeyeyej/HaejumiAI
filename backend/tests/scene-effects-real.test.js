@@ -30,6 +30,13 @@ test('real FFmpeg applies landscape blur padding, image zoom/pan, fade and Korea
   ];
   const ass = buildAss(captions, 4, scenes);
   assert.match(ass, /Emphasis/); assert.match(ass, /Information/);
+  assert.match(ass, /Style: Default,Noto Sans KR,74,/);
+  assert.match(ass, /Style: Emphasis,Noto Sans KR,88,/);
+  assert.match(ass, /Style: Information,Noto Sans KR,68,/);
+  assert.match(ass, /\\t\(0,180,\\fscx100\\fscy100\)/, 'food highlight gets a short pop effect');
+  assert.match(ass, /\\fad\(120,160\)/, 'clean information fades in and out');
+  const short = buildAss([{ order: 1, start_seconds: 0, end_seconds: 0.2, text: '짧게' }], 3);
+  assert.match(short, /\\fad\(50,50\)/, 'a short caption stays visible instead of spending its whole interval fading');
   const result = await createFFmpegRenderer({ mediaRoot, outputRoot }).render({ mediaItems, scenes, captions,
     targetSeconds: 4, framing: 'fit_pad', projectId: randomUUID(), version: 1 });
   assert.equal(result.verified, true);

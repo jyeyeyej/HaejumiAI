@@ -50,7 +50,10 @@ export class LLMGateway {
         ? await (async () => { reserve(); return this.provider.generateStructured({ prompt, input, purpose }); })()
         : await this.privacyGate.dispatchExternal({ ownerId, taskId, consentId, resourceIds, purpose, providerId: this.provider.providerId,
           dataCategories, estimatedCostUsd: estimate }, async () => { reserve(); return this.provider.generateStructured({ prompt, input, purpose }); });
-      if (!response || typeof response !== 'object' || Array.isArray(response)) return { available: false, reason: 'INVALID_MODEL_OUTPUT', usage: usageForAttempt() };
+      if (!response || typeof response !== 'object' || Array.isArray(response)) return { available: false, reason: 'INVALID_MODEL_OUTPUT', usage: usageForAttempt(),
+        diagnostic: { validation_code: 'ROOT_OBJECT_REQUIRED', field_path: '$', expected_type: 'object',
+          actual_type: response === null ? 'null' : Array.isArray(response) ? 'array' : typeof response,
+          json_parse_succeeded: true, output_truncated: false } };
       return { available: true, output: response, reason: null, usage: usageForAttempt() };
     } catch (error) {
       return { available: false, reason: safeReason(error), usage: usageForAttempt(),
@@ -63,7 +66,11 @@ export class LLMGateway {
           ...(error?.code === 'OPENAI_TIMEOUT' ? { gateway_elapsed_ms: Math.max(0, Math.round(performance.now() - gatewayStarted)) } : {}),
           ...(typeof error?.requestStarted === 'boolean' ? { request_started: error.requestStarted } : {}),
           ...(typeof error?.headersReceived === 'boolean' ? { headers_received: error.headersReceived } : {}),
-          ...(typeof error?.bodyReceived === 'boolean' ? { body_received: error.bodyReceived } : {}) } : null };
+          ...(typeof error?.bodyReceived === 'boolean' ? { body_received: error.bodyReceived } : {}),
+          ...(['RESPONSE_BODY_INVALID', 'RESPONSE_INCOMPLETE', 'OUTPUT_ITEMS_INVALID', 'OUTPUT_TEXT_MISSING', 'OUTPUT_TEXT_TOO_LONG', 'JSON_PARSE_FAILED']
+            .includes(error?.outputValidationCode) ? { validation_code: error.outputValidationCode } : {}),
+          ...(typeof error?.jsonParseSucceeded === 'boolean' ? { json_parse_succeeded: error.jsonParseSucceeded } : {}),
+          ...(typeof error?.outputTruncated === 'boolean' ? { output_truncated: error.outputTruncated } : {}) } : null };
     }
   }
 

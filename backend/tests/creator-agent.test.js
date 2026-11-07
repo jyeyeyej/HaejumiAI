@@ -55,6 +55,104 @@ test('Creator does not call the LLM when local image preparation produced no sel
   assert.equal(result.generation.gate_reason, 'LOCAL_MEDIA_PREPARATION_UNAVAILABLE');
 });
 
+test('Vision Mock drops game and food captions bound to the wrong photo interval', async () => {
+  const media = ['game', 'ramen', 'sunset'].map((id, index) => ({ mediaId: id, mediaType: 'image/jpeg',
+    imageDataUrl: `data:image/jpeg;base64,${index}`, sampleSha256: String(index + 1).repeat(64) }));
+  const scenes = media.map((item, index) => ({ order: index + 1, media_id: item.mediaId, media_type: item.mediaType,
+    start_seconds: index * 4, end_seconds: (index + 1) * 4,
+    caption_text: ['게임 장면', '게임 중이에요', '라면 두 그릇'][index] }));
+  const wrong = { plan: { scenes, media_insights: media.map((item) => ({ media_id: item.mediaId,
+    description: { game: '보드게임이 보입니다.', ramen: '컵라면 두 개와 음료가 보입니다.', sunset: '노을빛 호수가 보입니다.' }[item.mediaId],
+    mood: '확인 필요', subjects: [], usable_detail: '', uncertainty: '', category: 'other', orientation: 'landscape' })) }, captions: [
+    { order: 1, media_id: 'game', start_seconds: 4, end_seconds: 6, text: '게임 중이에요' },
+    { order: 2, media_id: 'ramen', start_seconds: 8, end_seconds: 10, text: '라면 두 그릇' },
+  ] };
+  const makeAgent = (output) => new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock', model: 'synthetic-model' },
+    generate: async () => ({ available: true, output, usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } }) } });
+  const input = { ownerId: 'owner', taskId: 'task', project: { target_seconds: 12, current_version: 1 }, media,
+    requestText: '사진으로 쇼츠를 만들어줘', privacyConsentId: 'synthetic-consent' };
+  const blocked = await makeAgent(wrong).createPlan(input);
+  assert.equal(blocked.generation.source, 'local_rules');
+  assert.deepEqual(blocked.captions, []);
+  const partial = structuredClone(wrong);
+  partial.captions.push({ order: 3, media_id: 'sunset', start_seconds: 10, end_seconds: 12, text: '노을빛 하늘' });
+  const kept = await makeAgent(partial).createPlan(input);
+  assert.deepEqual(kept.captions.map((caption) => [caption.media_id, caption.text]), [['sunset', '노을빛 하늘']]);
+  assert.equal(kept.captions[0].scene_id, kept.plan.scenes[2].scene_id);
+  assert.equal(kept.captions[0].caption_source, 'vision');
+  assert.equal(kept.captions[0].caption_status, 'needs_review');
+  // A plausible ID/time pair cannot prove the model actually described that photo.
+  const semanticMismatch = structuredClone(wrong);
+  semanticMismatch.captions = [{ order: 1, media_id: 'ramen', start_seconds: 4, end_seconds: 6,
+    text: '친구들과 신나게 게임 중이에요', caption_kind: 'observed_fact', evidence: '게임하는 장면' }];
+  const unverified = await makeAgent(semanticMismatch).createPlan(input);
+  assert.equal(unverified.captions[0].media_id, 'ramen');
+  assert.equal(unverified.captions[0].caption_status, 'needs_review');
+  assert.equal(unverified.captions[0].caption_kind, 'observed_fact');
+  assert.equal(unverified.captions[0].caption_review_reason, 'visual_fact_unverified');
+  assert.equal(unverified.captions[0].caption_basis.insight_description, '컵라면 두 개와 음료가 보입니다.');
+  assert.equal(unverified.captions[0].caption_basis.model_evidence, '게임하는 장면');
+  assert.equal(unverified.captions[0].caption_basis.analysis_id, unverified.plan.media_insights[1].analysis_provenance.analysis_id);
+  assert.equal(unverified.plan.media_insights[1].analysis_provenance.sample_sha256, '2'.repeat(64));
+  assert.equal(unverified.plan.media_insights[1].analysis_provenance.model, 'synthetic-model');
+  assert.equal(unverified.plan.media_insights[1].analysis_provenance.content_version, 2);
+  assert.equal(unverified.plan.scenes[1].visual_analysis_status, 'ai_unverified');
+  const emotional = structuredClone(wrong);
+  emotional.captions = [{ order: 1, media_id: 'sunset', start_seconds: 8, end_seconds: 10,
+    text: '여유로운 시간', caption_kind: 'emotional', evidence: '노을빛 호수 분위기' }];
+  const expressive = await makeAgent(emotional).createPlan(input);
+  assert.equal(expressive.captions[0].caption_kind, 'emotional');
+  assert.equal(expressive.captions[0].caption_review_reason, 'editorial_confirmation');
+  assert.equal(expressive.captions[0].caption_status, 'needs_review', 'even editorial text still requires draft approval');
+});
+
+test('Vision Mock maps reordered insights by ID and leaves invalid or duplicate IDs unassigned', async () => {
+  const media = ['game', 'ramen'].map((mediaId, index) => ({ mediaId, mediaType: 'image/jpeg',
+    imageDataUrl: `data:image/jpeg;base64,${index}`, sampleSha256: String(index + 1).repeat(64) }));
+  const insight = (media_id, description) => ({ media_id, description, mood: '확인 필요', subjects: [],
+    usable_detail: '', uncertainty: '', category: 'other', orientation: 'portrait' });
+  const game = insight('game', '숫자 타일이 놓인 피크닉 매트');
+  const ramen = insight('ramen', '라면 두 그릇과 음료 캔');
+  const output = (media_insights) => ({ plan: { title_idea: '두 장면', format: 'vertical_short', aspect_ratio: '9:16',
+    target_seconds: 8, theme: '피크닉', opening_hook: '장면을 볼까요?', story_flow: '두 사진을 차례로 보여줍니다.',
+    mood: '차분함', ending_line: '마무리합니다', recommended_media_order: ['game', 'ramen'], media_insights,
+    scenes: media.map((item, index) => ({ order: index + 1, media_id: item.mediaId, media_type: item.mediaType,
+      start_seconds: index * 4, end_seconds: (index + 1) * 4, visual_direction: '사진을 보여줍니다.', caption_text: '' })) },
+  captions: [{ order: 1, media_id: 'game', start_seconds: 0, end_seconds: 2, text: '숫자 타일이 보여요' },
+    { order: 2, media_id: 'ramen', start_seconds: 4, end_seconds: 6, text: '라면 두 그릇이 보여요' }] });
+  const run = async (insights) => new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock', model: 'synthetic-model' },
+    generate: async () => ({ available: true, output: output(insights), usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } }) } })
+    .createPlan({ ownerId: 'owner', taskId: 'task', project: { target_seconds: 8, current_version: 1 }, media,
+      requestText: '피크닉 쇼츠', privacyConsentId: 'synthetic-consent' });
+
+  const normal = await run([game, ramen]);
+  assert.deepEqual(normal.plan.media_insights.map((item) => item.description), [game.description, ramen.description]);
+  assert.equal(normal.generation.fallback_used, false);
+  const reordered = await run([ramen, game]);
+  assert.deepEqual(reordered.plan.media_insights.map((item) => item.description), [game.description, ramen.description]);
+  assert.equal(reordered.generation.fallback_used, false, 'response array order does not alter ID mapping');
+
+  for (const bad of [[game, { ...ramen, media_id: 'unknown' }], [game], [game, { ...ramen, media_id: undefined }]]) {
+    const result = await run(bad);
+    assert.equal(result.plan.media_insights[0].description, game.description);
+    assert.equal(result.plan.media_insights[1].category, 'unknown');
+    assert.equal(result.plan.media_insights[1].analysis_provenance, undefined);
+    assert.equal(result.captions[1].caption_status, 'needs_review');
+  }
+  const duplicate = await run([game, { ...game, description: ramen.description }, ramen]);
+  assert.equal(duplicate.plan.media_insights[0].category, 'unknown', 'duplicate ID must not use last-wins content');
+  assert.equal(duplicate.plan.media_insights[0].analysis_provenance, undefined);
+  assert.equal(duplicate.plan.media_insights[1].description, ramen.description);
+  assert.equal(duplicate.plan.scenes[0].caption_text, '');
+  assert.deepEqual(duplicate.captions.map((item) => item.media_id), ['ramen']);
+
+  const semanticMismatch = await run([{ ...game, description: ramen.description }, { ...ramen, description: game.description }]);
+  assert.equal(semanticMismatch.captions.every((item) => item.caption_status === 'needs_review'), true);
+  assert.equal(semanticMismatch.plan.scenes.every((item) => item.visual_analysis_status === 'ai_unverified'), true);
+  // Correct IDs cannot establish that the model described the matching image.
+  assert.equal(semanticMismatch.plan.media_insights[0].description, ramen.description);
+});
+
 test('Vision budget denial and invalid output remain labeled local empty drafts', async () => {
   const input = { ownerId: 'owner', taskId: 'task', project: { target_seconds: 8 }, requestText: '여행 쇼츠',
     privacyConsentId: 'synthetic-consent', media: [{ mediaId: 'selected', mediaType: 'image/jpeg', imageDataUrl: 'data:image/jpeg;base64,c3ludGhldGlj' }] };
@@ -150,6 +248,8 @@ test('Creator accepts labeled photo/video Mock insights and rejects template cap
     ownerId: 'owner', taskId: 'task', project: { target_seconds: 8 }, media, requestText: '차분한 여행', privacyConsentId: 'consent' });
   assert.equal(recovered.generation.source, 'mock');
   assert.equal(recovered.generation.fallback_used, true);
+  assert.equal(recovered.plan.scenes[0].visual_analysis_status, 'unavailable');
+  assert.equal(recovered.captions[0].caption_basis.analysis_id, null);
   assert.deepEqual(recovered.captions.map((caption) => caption.text), ['이 길의 끝에는?', '천천히 바라봅니다']);
   assert.equal(recovered.captions[1].start_seconds, 4);
   assert.equal(recovered.captions[1].end_seconds, 7.5);
@@ -187,7 +287,8 @@ test('Mock food, cafe and travel insights carry different scene-level editing ch
     recommended_media_order: categories, media_insights: media.map((item, index) => ({ media_id: item.mediaId,
       description: `${categories[index]} 합성 입력`, mood: '확인 필요', subjects: [], usable_detail: '테스트용', uncertainty: '',
       category: categories[index], orientation: 'landscape' })), scenes },
-    captions: scenes.map((scene) => ({ order: scene.order, start_seconds: scene.start_seconds, end_seconds: scene.end_seconds, text: scene.caption_text })) };
+    captions: scenes.map((scene) => ({ order: scene.order, media_id: scene.media_id,
+      start_seconds: scene.start_seconds, end_seconds: scene.end_seconds, text: scene.caption_text })) };
   const agent = new CreatorAgent({ gateway: { enabled: true, provider: { mode: 'mock' }, generate: async () =>
     ({ available: true, output, usage: { calls_for_task: 1, estimated_cost_usd: 0.001 } }) } });
   const result = await agent.createPlan({ ownerId: 'owner', taskId: 'task', project: { target_seconds: 9 }, media,

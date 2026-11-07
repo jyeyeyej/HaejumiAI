@@ -101,6 +101,8 @@
 
 현재 reference 구현의 외부 비전 범위는 OpenAI `vision_analysis`만 지원합니다. 사용자가 고지에서 확인한 목적/data categories 외에 정확한 `resource_ids` 집합을 consent에 저장하고, Creator task의 현재 소유 미디어 IDs와 일치해야 합니다. 사진 축소·메타데이터 제거 및 영상 frame 추출은 로컬 어댑터이며, 준비된 최대 N개(기본 5개) 시각 입력만 전송합니다. OpenAI 연결 flag/key/model 부재, 준비 실패, 예산 초과 또는 consent 검증 실패 시 해당 요청은 로컬 규칙 처리로 완료되고 provider egress는 0회입니다. 실제 사용자 대상 consent UI와 실계정 호출은 아직 구현/검증되지 않았습니다.
 
+신규 JSON Creator 기획은 위 **전체 미디어 ID 집합 동의**를 시작 전에 검사하고, 사진별 독립 Vision 호출마다 해당 ID 하나가 그 집합에 속하는지 PrivacyGate에서 다시 검사합니다. 한 요청에 축소 이미지 한 장만 전송합니다. 사진별 성공·실패·캐시 상태는 `generation.media_analysis`로 반환하며, 사진별 결과가 있더라도 자막은 `needs_review`입니다. 남은 작업당 호출·일/월 예약 예산에서 허용할 때만 이미지 없는 전체 스토리 요청을 추가합니다. 기존 프로젝트의 기획과 승인 이력을 자동 변환하지 않습니다.
+
 ## 승인 종류·상태 전이 — [제안/승인 대기]
 
 ### 독립된 권한
@@ -182,6 +184,10 @@ Publishing uncertainty: publishing → outcome_unknown → reconciling
 `GET /capabilities`가 모듈 ID, capability ID, 모듈 버전, 입력 schema version, 활성 상태, data scopes, Tool allowlist 참조를 반환하도록 제안합니다. `module_id`와 capability ID는 closed enum이 아닌 제한 형식의 안정된 string입니다. 서버 Registry에 등록되고 `enabled`인 capability만 `/tasks`에서 실행할 수 있습니다. 미등록/비활성 항목은 각각 `404 CAPABILITY_NOT_FOUND`/`403 CAPABILITY_DISABLED`로 거부합니다.
 
 현재 MVP의 핵심 Agent는 Creator·Schedule·Wellness·Diary로 유지합니다. Blog·Music은 미래 예시일 뿐이며 이 API 초안에 식별자가 있다는 이유만으로 활성화되지 않습니다. 신규 모듈은 모듈 자체 schema version, scope, 외부전송 정책, 승인 조합, 비용·권리 정책과 테스트를 Registry에 등록해야 하며 기존 모듈의 request/response를 변경하지 않는 방향을 제안합니다.
+
+## Schedule Google Calendar Mock 확장 (2026-11-08)
+
+사용자가 승인한 분리 계약에 따라 기존 로컬 일정 경로와 별도로 `/api/v1/schedule/google/connection`, `/connection/start`, `/oauth/callback`, `/events`, `/events/{google_event_id}`, `/proposals`, `/proposals/{proposal_id}/confirm`을 추가했습니다. 정확한 메서드·입력·응답 및 오류는 `docs/openapi-v1.yaml`을 기준으로 합니다. Google 이벤트는 `source: google`, 외부 ID·ETag·시간대·하루 종일 날짜·동기화 상태를 갖고 로컬 일정으로 자동 변환하지 않습니다. 쓰기는 소유자별 10분짜리 제안과 별도 확인·멱등 키를 거치며 중복 일정과 ETag 충돌을 거부합니다. 운영 서버는 실제 공급자와 토큰 키를 주입하지 않아 외부 Google 요청을 실행할 수 없습니다. 실제 OAuth·Calendar API와 화면 연결은 별도 단계입니다.
 
 ## 프로젝트 생성 요청 예시
 ```json

@@ -66,6 +66,42 @@ test('OpenAI adapter uses Responses JSON output, selected image data, no storage
   assert.equal(seen.init.signal instanceof AbortSignal, true);
 });
 
+test('Vision Mock preserves manifest order and pairs each media ID with only its own image sample', async () => {
+  let content;
+  const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model', maxImages: 3,
+    fetchImpl: async (_url, init) => {
+      content = JSON.parse(init.body).input[0].content;
+      return { ok: true, json: async () => ({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(planResult) }] }] }) };
+    } });
+  const media = [
+    { media_id: 'game', media_type: 'image/jpeg', image_data_url: 'data:image/jpeg;base64,Zw==' },
+    { media_id: 'ramen', media_type: 'image/jpeg', image_data_url: 'data:image/jpeg;base64,cg==' },
+    { media_id: 'sunset', media_type: 'image/jpeg', image_data_url: 'data:image/jpeg;base64,cw==' },
+  ];
+  await provider.generateStructured({ purpose: 'vision_analysis', prompt: 'Plan selected scenes', input: { request: 'synthetic', target_seconds: 30, media } });
+  const manifest = content[0].text;
+  assert.ok(manifest.indexOf('"media_id":"game"') < manifest.indexOf('"media_id":"ramen"'));
+  assert.ok(manifest.indexOf('"media_id":"ramen"') < manifest.indexOf('"media_id":"sunset"'));
+  for (let index = 0; index < media.length; index += 1) {
+    assert.match(content[1 + index * 2].text, new RegExp(`media_id=${media[index].media_id}(?:;|$)`));
+    assert.equal(content[2 + index * 2].image_url, media[index].image_data_url);
+  }
+});
+
+test('OpenAI response parsing preserves returned media IDs and order for later validation', async () => {
+  const returned = { plan: { media_insights: [{ media_id: 'ramen', description: '합성 라면' },
+    { media_id: 'game', description: '합성 타일' }] }, captions: [] };
+  const provider = new OpenAIProvider({ apiKey: 'synthetic-only-test-key', model: 'test-model',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ output: [{ content: [
+      { type: 'output_text', text: JSON.stringify(returned) }] }] }) }) });
+  const parsed = await provider.generateStructured({ purpose: 'vision_analysis', prompt: 'synthetic only',
+    input: { request: 'synthetic only', target_seconds: 8, media: [
+      { media_id: 'game', media_type: 'image/jpeg', image_data_url: 'data:image/jpeg;base64,Zw==' },
+      { media_id: 'ramen', media_type: 'image/jpeg', image_data_url: 'data:image/jpeg;base64,cg==' },
+    ] } });
+  assert.deepEqual(parsed.plan.media_insights, returned.plan.media_insights);
+});
+
 test('OpenAI network dispatch stays at zero when consent is absent or revoked', async () => {
   let dispatches = 0; let consentActive = false;
   const provider = { providerId: 'openai', mode: 'external', estimateCostUsd: async () => 0.001,
@@ -171,7 +207,7 @@ test('Creator scene result is built from only selected, locally prepared media a
       recommended_media_order: ['selected-image-id'],
       media_insights: [{ media_id: 'selected-image-id', description: '커피와 디저트가 보입니다.', mood: '포근함', subjects: ['커피', '디저트'], usable_detail: '컵과 접시', uncertainty: '', category: 'cafe', orientation: 'landscape' }],
       scenes: [{ order: 1, media_id: 'selected-image-id', media_type: 'image/jpeg', start_seconds: 0, end_seconds: 30, visual_direction: '커피와 디저트 장면', caption_text: '달콤한 카페 시간' }] },
-      captions: [{ order: 1, start_seconds: 0, end_seconds: 30, text: '달콤한 카페 시간' }] }; } };
+      captions: [{ order: 1, media_id: 'selected-image-id', start_seconds: 0, end_seconds: 30, text: '달콤한 카페 시간' }] }; } };
   const gateway = new LLMGateway({ enabled: true, provider, privacyGate: new PrivacyGate({ enabled: true, providerAllowlist: ['openai'], consentVerifier: async (context) =>
     context.ownerId === 'owner-a' && context.consentId === 'consent-a' && context.resourceIds.length === 1 && context.purpose === 'vision_analysis' }) });
   const agent = new CreatorAgent({ gateway });

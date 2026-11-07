@@ -21,6 +21,7 @@ import { OpenAIProvider } from '../../application/openai-provider.js';
 import { createFFmpegFrameExtractor } from '../../media-engine/ffmpeg-frame-extractor.js';
 import { createFFmpegImagePreparer } from '../../media-engine/ffmpeg-image-preparer.js';
 import { YouTubeTrends } from '../../application/youtube-trends.js';
+import { GoogleCalendarService } from '../../application/google-calendar-service.js';
 
 const projectRoot = resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
 loadDotEnv(join(projectRoot, '.env'));
@@ -74,6 +75,8 @@ const supervisorRouter = new SupervisorRouter(capabilityRegistry);
 const creatorAgent = new CreatorAgent({ gateway: llmGateway });
 const trends = new YouTubeTrends({ apiKey: process.env.HAEJUMI_YOUTUBE_API_KEY || process.env.YOUTUBE_API_KEY || '',
   enabled: parseBoolean(process.env.HAEJUMI_TRENDS_LIVE_ENABLED, false) });
+// Mock-only phase: no live Google provider or OAuth credentials are loaded.
+const googleCalendar = new GoogleCalendarService({ state });
 const renderDir = ensureStorageDirectory(safeStoragePath(dataDir, 'renders'), dataDir);
 const renderer = createFFmpegRenderer({ mediaRoot: repositories.blobDir, outputRoot: renderDir, ...mediaToolPaths });
 const renderCoordinator = createRenderCoordinator({ repositories, renderer });
@@ -89,7 +92,7 @@ const auth = {
   },
 };
 
-const server = createServer(createApiHandler({ repositories, auth, webSessions, maxMediaBytes, renderCoordinator, capabilityRegistry, supervisorRouter, creatorAgent, llmGateway, llmAvailability, trends }));
+const server = createServer(createApiHandler({ repositories, auth, webSessions, maxMediaBytes, renderCoordinator, capabilityRegistry, supervisorRouter, creatorAgent, llmGateway, llmAvailability, trends, googleCalendar }));
 server.listen(Number(process.env.HAEJUMI_PORT || 8765), host, () => {
   process.stdout.write(`Haejumi reference backend listening on http://${host}:${server.address().port}\n`);
 });

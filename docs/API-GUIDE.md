@@ -131,7 +131,17 @@ PC 웹의 장면별 자동 혼합 편집은 현재 검색 결과의 주제·키�
 
 장면과 자막 연결: `PUT /tasks/{task_id}/plan`의 각 장면에 기존 `scene_id`를 보내면 재정렬·길이 변경 시 같은 장면으로 인식합니다. 처음 만든 장면은 `scene_id`를 생략하며 프로젝트에 이미 선택된 `media_id`만 재사용할 수 있습니다. 같은 미디어의 새 장면을 추가하거나 기존 장면을 제외해도 업로드 원본과 manifest는 보존됩니다. `visual_description`은 사용자가 직접 확인한 장면 설명으로 저장됩니다. 자막 응답의 `scene_id`·`media_id`는 실제 렌더 장면을 가리키며 시간이 장면 밖이거나 ID가 다르면 거부됩니다. 기존 ID 없는 자막은 시간으로만 연결되므로 사용자 재확인이 필요합니다. Vision 출력 자막도 사람이 의미를 검토해야 하며, 모델이 확인하지 못한 시각 내용을 로컬 도구가 판정했다고 표시하지 않습니다. `GET /media/{media_id}/image-preview`는 소유자 인증 후 JPG·PNG·WebP 원본 바이트를 로컬 브라우저에만 보여주며 캐시하지 않습니다. 영상 썸네일과 자막 의미의 자동 판정은 아직 제공하지 않습니다.
 
-현재 외부 호출 기본 비활성화이며 이번 테스트에서는 Mock/가짜 `fetch`만 사용합니다. 초기 한도는 설정 가능한 제안값으로 일 `$0.20`, 월 `$5`, 작업당 5회입니다. 준비 미디어당 예상비용은 보수 예약 설정값이지 청구액 보증이 아닙니다. 예산 예약은 로컬 state에 기록하고 timeout이나 애매한 결과는 자동 재호출하지 않습니다.
+신규 Vision 기획의 미디어별 `analysis_provenance`에는 분석 ID, 모델, 로컬 저장 시각, 콘텐츠 버전, 축소 샘플 SHA-256을 선택적으로 기록합니다. 원본 및 외부 전송 이미지 바이트는 이 근거에 보관하지 않습니다. 자막의 `caption_kind`는 AI가 제안한 사실 주장·사용자 정보 주장·감성·이야기 연결 유형이며, `caption_basis`는 같은 `media_id`의 분석 설명과 모델이 제시한 근거 후보를 연결합니다. 이는 사실 검증 결과가 아닙니다. 사실 주장과 출처 미확인 자막은 `needs_review`로 표시하고 사용자가 사진과 직접 대조한 뒤 기존 초안 checkpoint를 승인해야 합니다. 오래된 프로젝트에는 이 선택 필드가 없고 자동 보정되지 않습니다. 사용자 수정 자막은 이전 AI 근거를 재사용하지 않습니다.
+
+Vision 응답의 `media_insights`는 배열 위치가 아닌 `media_id`로 연결합니다. 모르는 ID와 누락된 ID의 설명은 사용하지 않고, 중복된 ID의 설명·장면 제안·자막도 해당 사진에 적용하지 않습니다. 유효한 ID와 샘플 해시는 모델이 사진 내용을 올바르게 설명했다는 증명이 아니므로, 사진과 자막의 의미는 사용자 검토 전까지 미확인입니다.
+
+신규 OpenAI Creator 기획은 샘플당 이미지 하나로 독립 Vision 요청을 보내고, 서버가 응답을 요청 대상 `media_id`에만 귀속합니다. 모델이 다른 ID를 반환하거나 출력 형식이 잘못되면 그 사진의 분석만 보류합니다. 사진별 응답은 관찰 설명과 별도의 짧은 한국어 `caption_suggestion`을 요청합니다. 설명은 서버에서 최대 500자, 자막 후보는 장면의 실제 표시 시간에 따른 기존 길이 제한을 적용합니다. 분석 설명을 그대로 자막으로 복사하거나 잘라 쓰지 않습니다. 후보가 없거나 길이·형식 검사를 통과하지 못하면 `generation.media_analysis[].caption_status`와 안전한 사유를 남기며 자막은 비워 둡니다. 유효한 신규 자막도 모두 `needs_review`이고 사용자 기획·초안 승인 전에는 렌더할 수 없습니다. 과거 캐시에 자막 후보가 없으면 추가 외부 호출 없이 설명을 자막으로 바꾸지 않습니다.
+
+성공한 분석은 로컬 JSON 저장소에 소유자·media_id·축소 샘플 SHA-256·모델·분석 규격별로 저장하여 같은 조건일 때만 재사용합니다. 새 자막 계약은 `per_media_v2`로 구분해 기존 `per_media_v1` 캐시를 보존하고, 새 계약 결과를 과거 캐시로 잘못 재사용하지 않습니다. 새 규격의 분석은 명시적 동의와 예산 여유가 있을 때만 실행합니다. 로컬 사진별 분석 요청 ID도 기록하지만 원본 이미지나 공급자 응답 전문은 캐시에 저장하지 않습니다. 호출 여유가 있으면 **이미지 없이** 사진별 설명과 요청 문구로 전체 스토리를 제안합니다. 스토리 응답은 상위 기획 필드와 미디어 순서만 허용하고 장면별 사실·자막을 직접 바꾸지 않습니다. 거부되면 `generation.story_analysis`에 필드 경로·오류 코드만 기록하고 로컬 기획을 사용합니다. 작업당 5회 한도를 채운 경우에도 로컬 기획을 구성합니다. 현재 동의는 기획 시작 시 프로젝트의 전체 선택 미디어 집합과 정확히 일치해야 하며, 매 독립 호출 때 PrivacyGate가 해당 ID의 하위 범위를 다시 검사합니다. 사진 한 장의 모델 설명 자체가 틀릴 수 있으므로 실제 내용은 사용자가 확인해야 합니다.
+
+사용자가 요청 문장에 장소 자막을 명시하면 서버는 한정된 로컬 해석으로 장소·활동·감정 표현을 `plan.user_context`에 **사용자 제공 정보**로 분리합니다. 인식한 짧은 장소 문구는 사진별 AI 관찰 사실로 위장하지 않고 `needs_review` 자막 후보로만 넣습니다. 새 기획의 `generation.caption_refinement`는 장소 자막이 실제 타임라인에 포함됐는지, 일반적인 강가·강변·호숫가 표현을 몇 곳 줄였는지, 반영하지 못한 사유를 표시합니다. 인식하지 못한 장소를 사진이나 다른 장면의 Vision 결과로 추측하지 않습니다. 기존 저장 기획과 MP4는 자동 수정되지 않으며, 사용자 수정 후에는 새 콘텐츠 버전과 재승인이 필요합니다.
+
+외부 호출은 기본 비활성화이며 이 출력 계약 수정은 Mock/가짜 `fetch`로만 검증했습니다. 실제 환경의 일·월 한도는 서버 설정에 따릅니다. 준비 미디어당 예상비용은 보수 예약 설정값이지 청구액 보증이 아닙니다. 예산 예약은 로컬 state에 기록하고 timeout이나 애매한 결과는 자동 재호출하지 않습니다.
 
 ## 승인 종류는 서로 바꿔 쓸 수 없습니다
 
@@ -196,6 +206,30 @@ JSON 기반 Creator의 `DELETE /content/projects/{project_id}`는 인증된 소�
 
 비동기 렌더가 실패하면 HTTP 응답 대신 job의 `safe_error_code=RENDER_FAILED`를 사용합니다. 게시 결과 불명은 오류 코드가 아니라 `outcome_unknown` 상태입니다.
 
+## 현재 Creator 사진별 자막 계약
+
+Creator 사진별 분석의 현재 캐시 규격은 `per_media_v3`입니다. 관찰 설명은 사실 중심으로 유지하고, 별도 자막 후보에 친근한 브이로그 말투를 요청합니다. 과거 `per_media_v1`·`per_media_v2` 분석과 기존 프로젝트는 보존하되 새 말투 결과로 재사용하지 않습니다. 새 분석은 사용자가 다시 명시 동의하고 예산·호출 한도를 통과할 때만 실행합니다. `generation.caption_style_review`는 동일 자막 제외 건수와 반복 어미·설명체 검토 건수를 제공합니다. 이는 자막의 의미나 말투 품질이 검증됐다는 뜻이 아니므로 사진과 함께 검토해야 합니다.
+
+## Google Calendar Mock 계약
+
+기존 로컬 `/api/v1/schedule/events`와 `/api/v1/schedule/occurrences`는 그대로 사용합니다. Google 일정은 별도 `googleCalendar` 저장 영역과 `/api/v1/schedule/google/*` 경로를 씁니다. 모든 경로는 소유자 인증이 필요하며 OAuth callback만 일회용 `state`와 정확한 로컬 주소로 검증합니다. 현재 운영 서버에는 실제 Google 공급자와 토큰 키가 연결되지 않아 `GET /connection`의 `configured`가 `false`이며 외부 호출은 발생하지 않습니다. 아래 쓰기 동작은 주입한 Mock 공급자와 격리 테스트 데이터에서만 검증됐습니다.
+
+| 경로 | 용도 |
+|---|---|
+| `GET /schedule/google/connection` | 연결·동기화 상태 조회 |
+| `POST /schedule/google/connection/start` | OAuth state·PKCE 연결 시도 시작 (멱등 키 필수) |
+| `GET /schedule/google/oauth/callback` | 10분짜리 일회용 state와 정확한 127.0.0.1 콜백 확인 |
+| `DELETE /schedule/google/connection` | 로컬 토큰 폐기·연결 해제 (멱등 키 필수) |
+| `GET /schedule/google/events?from=YYYY-MM-DD&to=YYYY-MM-DD` | 기본 캘린더의 기간별 목록과 선택적 `q` 검색 |
+| `GET /schedule/google/events/{google_event_id}` | 외부 변경을 재조회하고 ETag 확인 |
+| `POST /schedule/google/proposals` | 생성·수정·삭제 제안만 보관 (멱등 키 필수) |
+| `POST /schedule/google/proposals/{proposal_id}/confirm` | 인증된 소유자의 명시적 확인 후 Mock 쓰기 (별도 멱등 키 필수) |
+
+제안 본문은 `kind: create|update|delete`와 생성·수정 시 `event`, 수정·삭제 시 `google_event_id`·`etag`를 포함합니다. `event`는 `title`, `all_day`, IANA `time_zone`, 선택적 `location`·`notes`를 사용합니다. 시간 일정에는 오프셋이 있는 `start_at`·`end_at`, 하루 종일 일정에는 시작일과 종료 다음 날인 `start_date`·`end_date`를 지정합니다. Google 반복 일정의 생성·수정과 알림 설정은 지원하지 않습니다. 같은 일정 중복은 `409 DUPLICATE_EVENT`, ETag 충돌은 `409 VERSION_CONFLICT`, 같은 멱등 키의 다른 본문은 `409 IDEMPOTENCY_CONFLICT`로 거부합니다. 공급자 쓰기 결과가 불분명하면 `503 GOOGLE_OUTCOME_UNKNOWN`으로 보류하며 자동 재시도하지 않습니다.
+
+토큰은 별도의 AES-256-GCM 파일에 암호문으로 저장하는 인터페이스만 구현됐습니다. 운영 키 공급, Google OAuth Client 설정, 실제 공급자 어댑터, PC 웹·Android 연결 UI, 예투의 Google 제안, 직접 입력 확인 카드는 아직 구현되지 않았습니다. 실제 계정 연결을 위해서는 [Schedule Google Calendar 계획](SCHEDULE-GOOGLE-CALENDAR-PLAN.md)의 후속 결정을 먼저 완료해야 합니다.
+
 ## 아직 승인되지 않은 설계
+
 
 초기 사용자 등록과 인증 토큰 발급, TLS/로컬 네트워크 방식, 동의 고지 UI와 철회 시점, 업로드 크기·조각·재개 규격, manifest canonicalization, 멱등 키 보존 기간, 플랫폼별 reconciliation 지원, account 연결 API, 모듈 입력 schema 호환 정책은 승인 대기입니다. API 전체 제안은 [`09-API-CONTRACT.md`](09-API-CONTRACT.md)에서 확인하실 수 있습니다.

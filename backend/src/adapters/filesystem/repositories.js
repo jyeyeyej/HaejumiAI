@@ -13,6 +13,7 @@ import { resolveMediaToolPaths } from '../../media-engine/media-tool-paths.js';
 
 export const PRIVACY_NOTICE_ID = '610ef7d0-c730-4de0-b24c-5b80e9241d11';
 export const PRIVACY_NOTICE_VERSION = '1';
+const CREATOR_VISION_SCHEMA = 'per_media_v3'; // Caption tone changed; keep older observations and projects intact.
 
 export class LocalRepositories {
   constructor({ state, dataDir, maxMediaBytes, maxSelectedMedia = 20, maxVisionImages = 5, videoFrameExtractor = null, imagePreparer = null }) {
@@ -83,7 +84,8 @@ export class LocalRepositories {
     if (!consent || consent.owner_id !== ownerId || consent.status !== 'active' || Date.parse(consent.expires_at) <= Date.now() ||
         consent.provider_id !== providerId || consent.purpose !== purpose || !consent.explicitly_confirmed ||
         !dataCategories.every((category) => consent.data_categories.includes(category)) ||
-        (purpose === 'vision_analysis' && JSON.stringify([...resourceIds].sort()) !== JSON.stringify([...(consent.resource_ids ?? [])].sort())) ||
+        (purpose === 'vision_analysis' && (!resourceIds.length || new Set(resourceIds).size !== resourceIds.length ||
+          resourceIds.some((id) => !(consent.resource_ids ?? []).includes(id)))) ||
         (purpose === 'diary_draft' && JSON.stringify([...resourceIds].sort()) !== JSON.stringify([...(consent.resource_ids ?? [])].sort())) ||
         (purpose === 'llm_text' && (consent.resource_ids?.length ?? 0) > 0)) return false;
     for (const resourceId of resourceIds) {
@@ -555,6 +557,14 @@ export class LocalRepositories {
     const expectedVersion = task.current_version;
     const media = project.media_ids.map((mediaId) => this.state.data.media[mediaId]);
     if (!media.length || media.some((item) => !item || item.ownerId !== ownerId || item.status !== 'available')) throw apiError(404, 'RESOURCE_NOT_FOUND', '선택한 프로젝트 미디어를 찾을 수 없습니다.');
+    // A per-image dispatch may use a subset, but the user's initial consent must
+    // still cover exactly this project's full selected-media set.
+    const perMediaVision = creatorAgent.gateway?.provider?.supportsPerMediaVision === true;
+    const consentForProject = input.privacy_consent_id && this.verifyPrivacyConsent({ ownerId,
+      consentId: input.privacy_consent_id, providerId: 'openai', purpose: 'vision_analysis',
+      dataCategories: ['selected_media', 'user_text'], resourceIds: project.media_ids }) &&
+      JSON.stringify([...this.state.data.privacyConsents[input.privacy_consent_id].resource_ids].sort()) ===
+        JSON.stringify([...project.media_ids].sort());
     this.state.data.idempotency[key] = { fingerprint, status: 'generating' };
     this.state.save();
     try {
@@ -564,20 +574,22 @@ export class LocalRepositories {
       const preparationStarted = performance.now();
       for (const item of media) {
         const selected = { mediaId: item.mediaId, mediaType: item.mediaType };
-        if (input.privacy_consent_id && preparedImageCount < this.maxVisionImages) {
+        if (input.privacy_consent_id && (!perMediaVision || consentForProject) && preparedImageCount < this.maxVisionImages) {
           try {
             const bytes = readRegularFile(safeStoragePath(this.blobDir, item.storageKey));
             if (sha256(bytes) !== item.sha256) throw apiError(409, 'VERSION_CONFLICT', '선택 미디어 무결성 검증에 실패했습니다.');
             if (item.mediaType.startsWith('image/') && this.imagePreparer) {
               const prepared = await this.imagePreparer(safeStoragePath(this.blobDir, item.storageKey));
               if (Buffer.isBuffer(prepared) && prepared.length > 0 && prepared.length <= 2 * 1024 * 1024) {
-                selected.imageDataUrl = `data:image/jpeg;base64,${prepared.toString('base64')}`; preparedImageCount += 1; preparedBytes += prepared.length;
+                selected.imageDataUrl = `data:image/jpeg;base64,${prepared.toString('base64')}`;
+                selected.sampleSha256 = sha256(prepared); preparedImageCount += 1; preparedBytes += prepared.length;
               }
             }
             else if (item.mediaType.startsWith('video/') && this.videoFrameExtractor) {
               const frame = await this.videoFrameExtractor(safeStoragePath(this.blobDir, item.storageKey));
               if (Buffer.isBuffer(frame) && frame.length > 0 && frame.length <= 2 * 1024 * 1024) {
-                selected.imageDataUrl = `data:image/jpeg;base64,${frame.toString('base64')}`; preparedImageCount += 1; preparedBytes += frame.length;
+                selected.imageDataUrl = `data:image/jpeg;base64,${frame.toString('base64')}`;
+                selected.sampleSha256 = sha256(frame); preparedImageCount += 1; preparedBytes += frame.length;
               }
             }
           } catch (error) {
@@ -592,6 +604,23 @@ export class LocalRepositories {
       const selectedReferences = selectedStyleReferences(project, input.reference_ids ?? []);
       const generated = await creatorAgent.createPlan({ ownerId, taskId, project: structuredClone(project), requestText: input.request_text.trim(),
         media: selectedMedia, revision: Boolean(project.creator_plan), privacyConsentId: input.privacy_consent_id ?? null,
+        visionCache: perMediaVision && consentForProject ? {
+          get: (mediaId, sampleHash, model) => {
+            const entry = this.state.data.creatorVisionInsights?.[`${mediaId}:${CREATOR_VISION_SCHEMA}`];
+            return entry?.owner_id === ownerId && entry.sample_sha256 === sampleHash && entry.model === model &&
+              entry.analysis_schema === CREATOR_VISION_SCHEMA && this.state.data.media[mediaId]?.ownerId === ownerId
+              ? structuredClone(entry) : null;
+          },
+          put: (mediaId, sampleHash, model, insight, analysisRequestId) => {
+            if (this.state.data.media[mediaId]?.ownerId !== ownerId) return;
+            this.state.data.creatorVisionInsights ??= {};
+            this.state.data.creatorVisionInsights[`${mediaId}:${CREATOR_VISION_SCHEMA}`] = { owner_id: ownerId, media_id: mediaId,
+              sample_sha256: sampleHash, model, analysis_schema: CREATOR_VISION_SCHEMA, insight: structuredClone(insight),
+              analysis_id: randomUUID(), analysis_request_id: analysisRequestId,
+              analyzed_at: new Date().toISOString() };
+            this.state.save();
+          },
+        } : null,
         styleReferences: selectedReferences });
       if ((selectedReferences.length || /빠르|하이라이트|역동|감성|부드럽|차분/u.test(input.request_text)) &&
           Array.isArray(generated.plan?.scenes)) {
@@ -835,6 +864,9 @@ export class LocalRepositories {
       const original = previous.get(scene.scene_id);
       return (captions.get(scene.scene_id) ?? []).map((caption) => ({
         scene_id: scene.scene_id, media_id: scene.media_id, caption_source: caption.caption_source ?? 'legacy_review', caption_status: 'needs_review',
+        ...(caption.caption_kind ? { caption_kind: caption.caption_kind } : {}),
+        ...(caption.caption_review_reason ? { caption_review_reason: caption.caption_review_reason } : {}),
+        ...(caption.caption_basis ? { caption_basis: caption.caption_basis } : {}),
         start_seconds: Math.round((scene.start_seconds + (caption.start_seconds - original.start_seconds) * (scene.end_seconds - scene.start_seconds) / (original.end_seconds - original.start_seconds)) * 100) / 100,
         end_seconds: Math.round((scene.start_seconds + (caption.end_seconds - original.start_seconds) * (scene.end_seconds - scene.start_seconds) / (original.end_seconds - original.start_seconds)) * 100) / 100,
         text: caption.text }));

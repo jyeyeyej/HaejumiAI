@@ -241,6 +241,9 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.equal(routed.generation.diagnostic.prepared_samples, 1);
   assert.ok(routed.generation.diagnostic.preparation_elapsed_ms >= 0);
   assert.ok(routed.generation.diagnostic.prepared_bytes > 0);
+  assert.equal(routed.plan.media_insights[0].analysis_provenance.source, 'mock');
+  assert.equal(routed.plan.media_insights[0].analysis_provenance.content_version, 2);
+  assert.equal(routed.plan.media_insights[0].analysis_provenance.sample_sha256, digest(Buffer.from('prepared-test-jpeg')));
   const planRead = await fetch(`${base}/tasks/${project.task_id}/plan`, { headers: headers() });
   assert.equal(planRead.status, 200);
   assert.equal((await planRead.json()).content_hash, routed.content_hash);
@@ -260,6 +263,10 @@ test('Supervisor routes registered Agents and Creator plan/draft approvals advan
   assert.equal(draft.status, 200);
   const draftValue = await draft.json();
   assert.equal(draftValue.captions[0].text, 'Mock 자막 1');
+  assert.equal(draftValue.captions[0].caption_basis.media_id, mediaId);
+  assert.equal(draftValue.captions[0].caption_basis.analysis_id, routed.plan.media_insights[0].analysis_provenance.analysis_id);
+  assert.equal(draftValue.captions[0].caption_kind, 'unclassified');
+  assert.equal(draftValue.captions[0].caption_status, 'needs_review');
   const draftApproval = await approve(draftValue.checkpoint, 'supervisor-draft-approval-01');
   assert.equal(draftApproval.status, 201, JSON.stringify(await draftApproval.json()));
   assert.equal((await fetch(`${base}/tasks/${project.task_id}`, { headers: headers() }).then((r) => r.json())).status, 'render_ready');
@@ -347,7 +354,65 @@ test('existing synthetic travel project recovers scene-only Vision captions afte
   const revisedDraft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
   assert.deepEqual(revisedDraft.captions.map((caption) => [caption.start_seconds, caption.end_seconds, caption.text]),
     [[0.4, 2.8, '길 위의 새로운 순간']]);
+  assert.equal(revisedDraft.captions[0].caption_basis, undefined, 'a user edit must not retain an obsolete AI evidence claim');
   assert.equal((await approve(revisedDraft.checkpoint, 'travel-redraft-approve-0001')).status, 201);
+});
+
+test('legacy unbound caption can be edited in isolated API state and requires fresh approvals', async (t) => {
+  const { base, repositories } = await fixture(t);
+  const { project, mediaId } = await prepareUnapprovedProject(base, 5353);
+  const jsonHeaders = { ...headers(), 'content-type': 'application/json' };
+  const plannedResponse = await fetch(`${base}/tasks/${project.task_id}/plan`, { method: 'POST',
+    headers: { ...jsonHeaders, 'idempotency-key': 'legacy-local-plan-0001' },
+    body: JSON.stringify({ content_version: 1, request_text: '사진으로 쇼츠 기획' }) });
+  assert.equal(plannedResponse.status, 201);
+  const planned = await plannedResponse.json();
+  assert.equal(planned.content_version, 2);
+  const stateProject = repositories.state.data.projects[project.project_id];
+  const stateTask = repositories.state.data.tasks[project.task_id];
+  delete stateProject.creator_plan.scenes[0].scene_id;
+  stateProject.caption_draft = [{ order: 1, start_seconds: 0, end_seconds: 3, text: '기존 자막' }];
+  stateProject.content_hash = repositories.contentHash(stateProject);
+  stateTask.content_hash = stateProject.content_hash;
+  repositories.state.data.checkpoints[planned.checkpoint.checkpoint_id].content_hash = stateProject.content_hash;
+  repositories.state.save();
+  const approve = (checkpoint, key) => fetch(`${base}/tasks/${project.task_id}/approvals`, { method: 'POST',
+    headers: { ...jsonHeaders, 'idempotency-key': key }, body: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id,
+      content_version: checkpoint.content_version, content_hash: checkpoint.content_hash, approval_scope: 'continue' }) });
+  const planCheckpoint = repositories.state.data.checkpoints[planned.checkpoint.checkpoint_id];
+  assert.equal((await approve(planCheckpoint, 'legacy-plan-approval-0001')).status, 201);
+  const oldDraft = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() }).then((r) => r.json());
+  assert.equal(oldDraft.captions[0].scene_id, undefined);
+  assert.equal(oldDraft.captions[0].media_id, undefined);
+  assert.equal((await approve(oldDraft.checkpoint, 'legacy-draft-approval-0001')).status, 201);
+  const preview = await fetch(`${base}/media/${mediaId}/image-preview`, { headers: headers() });
+  assert.equal(preview.status, 200);
+  assert.deepEqual(Buffer.from(await preview.arrayBuffer()), png);
+  const editedResponse = await fetch(`${base}/tasks/${project.task_id}/draft`, { method: 'PATCH',
+    headers: { ...jsonHeaders, 'idempotency-key': 'legacy-caption-edit-0001' }, body: JSON.stringify({
+      content_version: 2, content_hash: stateProject.content_hash,
+      captions: [{ order: 1, start_seconds: 0.5, end_seconds: 2.5, text: '사진의 색을 살펴봐요' }],
+      captions_enabled: true, music_track_id: null, source_volume: 1, music_volume: 0.25,
+      fade_in_seconds: 1, fade_out_seconds: 1,
+    }) });
+  assert.equal(editedResponse.status, 200);
+  const revised = await editedResponse.json();
+  assert.equal(revised.content_version, 3);
+  assert.equal(repositories.state.data.checkpoints[planned.checkpoint.checkpoint_id].status, 'invalidated');
+  assert.equal(repositories.state.data.checkpoints[oldDraft.checkpoint.checkpoint_id].status, 'invalidated');
+  assert.equal((await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() })).status, 409);
+  assert.equal((await approve(revised.checkpoint, 'legacy-replan-approval-0001')).status, 201);
+  const newDraftResponse = await fetch(`${base}/tasks/${project.task_id}/draft`, { headers: headers() });
+  assert.equal(newDraftResponse.status, 200);
+  const newDraft = await newDraftResponse.json();
+  assert.deepEqual(newDraft.captions.map((caption) => [caption.media_id, caption.start_seconds, caption.end_seconds, caption.text]),
+    [[mediaId, 0.5, 2.5, '사진의 색을 살펴봐요']]);
+  assert.equal(newDraft.captions[0].caption_source, 'user');
+  assert.equal(newDraft.captions[0].caption_status, 'needs_review');
+  assert.equal((await approve(newDraft.checkpoint, 'legacy-redraft-approval-0001')).status, 201);
+  const task = await fetch(`${base}/tasks/${project.task_id}`, { headers: headers() }).then((r) => r.json());
+  assert.equal(task.status, 'render_ready');
+  assert.equal(task.current_version, 3);
 });
 
 test('selected upload, completion, project creation and task status form the first Creator slice', async (t) => {

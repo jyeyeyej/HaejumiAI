@@ -122,7 +122,7 @@ export function App() {
 
   if (!local) return <main className="shell"><h1>해주미</h1><p>PC 웹은 이 PC의 localhost에서만 사용해 주세요.</p></main>;
 
-  return <div className="app">
+  return <div className={`app ${page === 'projects' && selected ? 'creator-app' : ''}`}>
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">ㅎ</span><div><strong>해주미</strong><small>예투와 함께 만드는 하루</small></div></div>
       <nav aria-label="주 메뉴">
@@ -134,6 +134,9 @@ export function App() {
         <button className={page === 'diary' ? 'nav-active' : ''} onClick={() => setPage('diary')}>✎ <span>Diary</span></button>
         <button className={page === 'settings' ? 'nav-active' : ''} onClick={() => setPage('settings')}>⚙ <span>설정</span></button>
       </nav>
+      <details className="mobile-navigation"><summary>메뉴 · {({ home: '홈', creator: 'Creator', projects: '프로젝트', schedule: 'Schedule', wellness: 'Wellness', diary: 'Diary', settings: '설정' })[page]}</summary><nav aria-label="모바일 메뉴">
+        {[['home', '홈'], ['creator', 'Creator'], ['projects', '프로젝트'], ['schedule', 'Schedule'], ['wellness', 'Wellness'], ['diary', 'Diary'], ['settings', '설정']].map(([id, label]) => <button key={id} className={page === id ? 'nav-active' : ''} onClick={(event) => { setPage(id); event.currentTarget.closest('details').open = false; }}>{label}</button>)}
+      </nav></details>
       <div className="sidebar-bottom"><span className="online-dot" />{connectionState === 'checking' ? '로그인 확인 중…' : api ? '로컬 PC 연결됨' : '연결 필요'}{api && <button className="text-button" disabled={busy} onClick={logout}>로그아웃</button>}<small>서버 데이터가 두 기기의 공통 기준입니다.</small></div>
     </aside>
     <main className="main">
@@ -149,10 +152,10 @@ export function App() {
       </>}
       {page === 'creator' && <><div className="page-title"><p className="eyebrow">CREATOR STUDIO</p><h1>쇼츠 만들기</h1><p>파일을 직접 고른 뒤 PC에서 기획과 렌더링을 진행합니다.</p></div><UploadCard api={api} onCreated={async (project) => { setSelected(project); await reload(); setPage('projects'); }} /></>}
       {page === 'projects' && <><div className="page-title"><p className="eyebrow">YOUR PROJECTS</p><h1>Creator 프로젝트</h1><p>PC와 Android가 같은 서버의 작업과 승인 상태를 사용합니다.</p></div>
-        <div className="workspace-layout"><section className="project-list card"><div className="section-head"><h2>프로젝트 목록</h2><button className="text-button" disabled={!api} onClick={() => reload().catch((error) => setStatus(error.message))}>새로고침</button></div>
+        <div className={`workspace-layout ${selected ? 'has-selection' : ''}`}><section className="project-list card"><div className="section-head"><h2>프로젝트 목록</h2><button className="text-button" disabled={!api} onClick={() => reload().catch((error) => setStatus(error.message))}>새로고침</button></div>
           {!api && <p className="muted">서버에 연결해 주세요.</p>}{api && projects.length === 0 && <p className="muted">아직 프로젝트가 없습니다. 직접 파일을 선택해 시작해 주세요.</p>}
           {projects.map((project, index) => <article key={project.project_id} className={`project-entry ${selected?.project_id === project.project_id ? 'selected' : ''}`}><button className="project-row" onClick={() => setSelected(project)}><strong>쇼츠 프로젝트 {projects.length - index}</strong><small>{project.target_seconds}초 · {project.framing} · 버전 {project.current_version}</small><span>작업 보기 →</span></button><button className="project-delete" disabled={deletingProjectId === project.project_id} onClick={() => deleteProject(project)} aria-label={`쇼츠 프로젝트 ${projects.length - index} 삭제`}>{deletingProjectId === project.project_id ? '삭제 중…' : '삭제'}</button></article>)}
-        </section><div>{selected && api ? <CreatorWorkspace key={selected.task_id} api={api} project={selected} onChanged={reload} /> : <div className="empty card">프로젝트를 선택해 기획과 미리보기를 확인해 주세요.</div>}</div></div></>}
+        </section><div>{selected && api ? <CreatorWorkspace key={selected.task_id} api={api} project={selected} onChanged={reload} onBack={() => setSelected(null)} /> : <div className="empty card">프로젝트를 선택해 기획과 미리보기를 확인해 주세요.</div>}</div></div></>}
       {['schedule', 'wellness', 'diary'].includes(page) && <PersonalWorkspace api={api} kind={page} />}
       {page === 'settings' && <SettingsWorkspace api={api} onConsentChange={setTextConsentId} />}
     </main>

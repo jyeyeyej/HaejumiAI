@@ -123,6 +123,12 @@ test('captions stay with scene IDs across reorder, duration change, reuse and re
   project.creator_plan = { scenes, media_insights: ids.map((media_id) => ({ media_id })) };
   project.caption_draft = scenes.map((scene, index) => ({ order: index + 1, scene_id: scene.scene_id, media_id: scene.media_id,
     start_seconds: scene.start_seconds, end_seconds: scene.end_seconds, text: words[index], caption_source: 'user' }));
+  const sourceAnalysisId = randomUUID();
+  project.caption_draft[1].caption_source = 'vision';
+  project.caption_draft[1].caption_kind = 'observed_fact';
+  project.caption_draft[1].caption_review_reason = 'visual_fact_unverified';
+  project.caption_draft[1].caption_basis = { media_id: ids[1], analysis_id: sourceAnalysisId,
+    insight_description: '컵라면과 음료가 보입니다.', model_evidence: '컵라면 두 개' };
   task.content_hash = project.content_hash = repo.contentHash(project);
   const edit = (ordered, durations) => repo.updateCreatorScenes(owner, created.task_id, {
     content_version: task.current_version, content_hash: task.content_hash,
@@ -133,6 +139,9 @@ test('captions stay with scene IDs across reorder, duration change, reuse and re
   assert.deepEqual(reordered.plan.scenes.map((scene) => scene.scene_id), [scenes[1].scene_id, scenes[0].scene_id, scenes[2].scene_id]);
   assert.deepEqual(project.caption_draft.map((caption) => caption.text), [words[1], words[0], words[2]]);
   assert.deepEqual(project.caption_draft.map((caption) => [caption.start_seconds, caption.end_seconds]), [[0, 1], [1, 4], [4, 6]]);
+  assert.equal(project.caption_draft[0].caption_basis.analysis_id, sourceAnalysisId);
+  assert.equal(project.caption_draft[0].caption_basis.media_id, ids[1]);
+  assert.equal(project.caption_draft[0].caption_review_reason, 'visual_fact_unverified');
   assert.equal(validCaptionTimeline(project.caption_draft, project.creator_plan.scenes, 6), true);
   assert.equal(validCaptionTimeline([{ ...project.caption_draft[0], scene_id: scenes[0].scene_id }], project.creator_plan.scenes, 6), false);
   const repeated = edit([reordered.plan.scenes[0], { media_id: ids[1] }, reordered.plan.scenes[1], reordered.plan.scenes[2]], [1, 1, 2, 2]);

@@ -13,6 +13,15 @@ test('caption editor keeps full-width multiline text and paired times with compa
   assert.match(css, /\.caption-text-label textarea\{[^}]*width:100%/);
   assert.match(css, /\.caption-time-grid\{[^}]*repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /@media\(max-width:480px\)/);
+  assert.match(jsx, /src=\{`\/api\/v1\/media\/\$\{scene\.media_id\}\/image-preview`\}/);
+  assert.match(jsx, /row\.caption_source === 'vision'.*'Vision 제안'.*'기존 자막'/);
+  assert.match(jsx, /\(!row\.media_id \|\| row\.media_id === item\.media_id\)/);
+  assert.match(jsx, /function changeCaption\(index, text\)/);
+  assert.match(jsx, /function changeTime\(index, field, value\)/);
+  assert.match(jsx, /api\.updateDraft\(taskId, body/);
+  assert.match(jsx, /row\.caption_basis\?\.insight_description/);
+  assert.match(jsx, /row\.caption_review_reason === 'visual_fact_unverified'/);
+  assert.match(jsx, /기존 자막은 사진별 분석 근거와 생성 출처가 기록되지 않았습니다/);
 });
 
 test('legacy local plan cannot copy a planning instruction into publication title', () => {
@@ -29,7 +38,8 @@ test('trend edit controls show separate evidence and local recommendations with 
   assert.match(jsx, /참고 영상 URL 추가/);
   assert.match(jsx, /참고 영상 직접 업로드/);
   assert.match(jsx, /메타데이터 기반 참고/);
-  assert.match(jsx, /기간별 트렌드 분석 추가/);
+  assert.match(jsx, /요청 내용으로 최근 영상 자동 참고/);
+  assert.doesNotMatch(jsx, /최근 영상 찾기/);
   assert.match(jsx, /role="tablist"/);
   assert.match(jsx, /sessionStorage\.setItem\(draftKey/);
   assert.match(jsx, /쇼츠 기획안 생성/);

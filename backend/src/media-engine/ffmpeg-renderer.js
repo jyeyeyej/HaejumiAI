@@ -240,13 +240,38 @@ export function buildAss(captions, duration, scenes = null) {
   const lines = captions.map((c, index) => {
     if (!c || c.order !== index + 1 || !Number.isFinite(c.start_seconds) || !Number.isFinite(c.end_seconds) || c.start_seconds < 0 || c.start_seconds >= c.end_seconds || c.end_seconds > duration ||
         typeof c.text !== 'string' || [...c.text].length > 80 || !CAPTION_TEXT_PATTERN.test(c.text)) throw renderError('VALIDATION_ERROR', '자막 길이 또는 시간을 확인해 주세요.');
-    const chars = [...c.text.replace(/\\/g, '＼').replace(/\{/g, '｛').replace(/\}/g, '｝')];
-    const wrapped = []; for (let i = 0; i < chars.length; i += 20) wrapped.push(chars.slice(i, i + 20).join(''));
+    const safeText = c.text.replace(/\\/g, '＼').replace(/\{/g, '｛').replace(/\}/g, '｝');
+    const chars = [...safeText];
     const scene = captionScene(c, scenes);
     const style = scene?.subtitle_style === 'emphasis' ? 'Emphasis' : scene?.subtitle_style === 'information' ? 'Information' : 'Default';
-    return `Dialogue: 0,${stamp(c.start_seconds)},${stamp(c.end_seconds)},${style},,0,0,0,,${wrapped.join('\\N')}`;
+    // Keep ordinary short captions large; shrink legacy long copy rather than
+    // letting it run outside the 1080px safe area. User text never becomes ASS syntax.
+    const long = chars.length > 28;
+    const baseWidth = long ? (chars.length > 52 ? 17 : 14) : style === 'Emphasis' ? 9 : style === 'Information' ? 12 : 11;
+    const escapedTokenLength = Math.max(0, ...[...safeText.matchAll(/｛[^｝]*｝/gu)].map((match) => [...match[0]].length));
+    const width = Math.max(baseWidth, Math.min(escapedTokenLength, 12));
+    const wrapped = wrapCaptionText(safeText, width);
+    const size = long ? (chars.length > 52 ? 45 : 56) : escapedTokenLength > baseWidth ? Math.floor(864 / width) : null;
+    const quarterMs = Math.max(0, Math.floor((c.end_seconds - c.start_seconds) * 250));
+    const fade = (inMs, outMs) => `\\fad(${Math.min(inMs, quarterMs)},${Math.min(outMs, quarterMs)})`;
+    const entrance = style === 'Emphasis' ? `\\fscx85\\fscy85\\t(0,${Math.min(180, quarterMs)},\\fscx100\\fscy100)${fade(90, 120)}`
+      : style === 'Information' ? fade(120, 160) : fade(220, 220);
+    return `Dialogue: 0,${stamp(c.start_seconds)},${stamp(c.end_seconds)},${style},,0,0,0,,{${size ? `\\fs${size}` : ''}${entrance}}${wrapped.join('\\N')}`;
   });
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Noto Sans KR,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,108,108,384,1\nStyle: Emphasis,Noto Sans KR,52,&H0000FFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,1,2,108,108,384,1\nStyle: Information,Noto Sans KR,38,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,8,108,108,320,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Noto Sans KR,74,&H00FFFFFF,&H000000FF,&H0016181A,&H80000000,1,0,0,0,100,100,0,0,1,4,2,2,108,108,420,1\nStyle: Emphasis,Noto Sans KR,88,&H0000EFFF,&H000000FF,&H00151821,&H80000000,1,0,0,0,100,100,0,0,1,5,2,2,108,108,470,1\nStyle: Information,Noto Sans KR,68,&H00FFFFFF,&H000000FF,&H0012181C,&H700A1014,1,0,0,0,100,100,0,0,3,2,0,8,108,108,320,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
+}
+
+function wrapCaptionText(text, width) {
+  const lines = []; let line = '';
+  for (const token of text.match(/\S+|\s+/gu) ?? []) {
+    if (/^\s+$/u.test(token)) { if (line) line += ' '; continue; }
+    const chars = [...token];
+    if (line && [...line].length + chars.length > width) { lines.push(line.trimEnd()); line = ''; }
+    while (chars.length > width) lines.push(chars.splice(0, width).join(''));
+    if (chars.length) line += chars.join('');
+  }
+  if (line.trim()) lines.push(line.trimEnd());
+  return lines;
 }
 
 async function hasAudioStream(spawn, ffprobePath, filePath, timeoutMs, signal) {

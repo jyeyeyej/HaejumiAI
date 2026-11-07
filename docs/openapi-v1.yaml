@@ -1517,6 +1517,115 @@ paths:
       responses:
         '200': { description: Soft deleted }
         '409': { $ref: '#/components/responses/Conflict' }
+  /schedule/google/connection:
+    get:
+      tags: [Schedule]
+      operationId: getGoogleCalendarConnection
+      summary: Read owner-scoped Google Calendar connection state
+      description: Production remains unconfigured during the Mock-only phase. No external request is made.
+      responses:
+        '200': { description: Connection status without tokens }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Schedule]
+      operationId: disconnectGoogleCalendar
+      summary: Disable local token use and disconnect this owner
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Disconnected; existing local schedule data retained }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: Google provider not configured }
+  /schedule/google/connection/start:
+    post:
+      tags: [Schedule]
+      operationId: startGoogleCalendarConnection
+      summary: Begin owner-authenticated OAuth with state and PKCE
+      description: Mock provider injection only; the production server does not initiate real Google OAuth in this phase.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201': { description: Authorization URL and short lifetime; no token }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: Google provider not configured }
+  /schedule/google/oauth/callback:
+    get:
+      tags: [Schedule]
+      operationId: completeGoogleCalendarConnection
+      summary: Validate one-time OAuth state and exchange an authorization code
+      description: Local loopback callback; state is owner-bound and expires after 10 minutes. Mock tests only in this phase.
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Connection status without tokens }
+        '403': { description: Invalid state or missing scope }
+        '503': { description: Provider unavailable or not configured }
+  /schedule/google/events:
+    get:
+      tags: [Schedule]
+      operationId: listGoogleCalendarEvents
+      summary: Fetch owned primary-calendar events on explicit request
+      description: Separate from local events. The provider is a Mock during this phase; no background polling or notifications.
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+        - { name: q, in: query, schema: { type: string, maxLength: 200 } }
+      responses:
+        '200': { description: Owner-scoped Google event list with source and sync state }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Disconnected or expired OAuth }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /schedule/google/events/{google_event_id}:
+    parameters:
+      - { name: google_event_id, in: path, required: true, schema: { type: string, pattern: '^[a-v0-9]{5,1024}$' } }
+    get:
+      tags: [Schedule]
+      operationId: getGoogleCalendarEvent
+      summary: Refetch one Google event before viewing or editing
+      responses:
+        '200': { description: Current event with ETag and source }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /schedule/google/proposals:
+    post:
+      tags: [Schedule]
+      operationId: proposeGoogleCalendarChange
+      summary: Prepare a Google create, update, or delete without executing it
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [create, update, delete] }
+                google_event_id: { type: string, pattern: '^[a-v0-9]{5,1024}$' }
+                etag: { type: string, minLength: 1 }
+                event: { $ref: '#/components/schemas/GoogleScheduleEventInput' }
+      responses:
+        '201': { description: Ten-minute owner-scoped preview; no Google write }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /schedule/google/proposals/{proposal_id}/confirm:
+    parameters:
+      - { name: proposal_id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Schedule]
+      operationId: confirmGoogleCalendarChange
+      summary: Execute one current owner-approved proposal with ETag and idempotency checks
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Confirmed result or idempotent replay }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { description: External outcome unknown; automatic retry is prohibited }
   /wellness/entries:
     get:
       tags: [Wellness]
@@ -2052,6 +2161,19 @@ components:
         opening_hook: { type: string, maxLength: 500 }
         story_flow: { type: string, maxLength: 500 }
         mood: { type: string, maxLength: 500 }
+        user_context:
+          type: object
+          additionalProperties: false
+          description: Bounded local extraction from the user's request; separate from unverified visual observations and absent on older plans.
+          required: [source, place, activities, emotion_terms, place_caption_requested, place_caption, place_caption_status]
+          properties:
+            source: { type: string, const: user_request }
+            place: { type: [string, 'null'], maxLength: 80 }
+            activities: { type: array, maxItems: 12, items: { type: string, maxLength: 12 } }
+            emotion_terms: { type: array, maxItems: 12, items: { type: string, maxLength: 20 } }
+            place_caption_requested: { type: boolean }
+            place_caption: { type: [string, 'null'], maxLength: 80 }
+            place_caption_status: { type: string, enum: [candidate, place_unrecognized, not_requested] }
         ending_line: { type: string, maxLength: 500 }
         recommended_media_order: { type: array, description: Suggested order only; actual order changes require a versioned scene edit and new approval., items: { type: string, format: uuid } }
         style_reference_ids: { type: array, maxItems: 8, items: { type: string, format: uuid } }
@@ -2106,12 +2228,25 @@ components:
             properties:
               media_id: { type: string, format: uuid }
               description: { type: string, maxLength: 500 }
+              caption_suggestion: { type: string, maxLength: 80, description: 'Optional short Korean subtitle candidate from a new per-media analysis. It is separate from the visual description, remains unverified, and is absent for legacy results.' }
               mood: { type: string, maxLength: 500 }
               subjects: { type: array, maxItems: 12, items: { type: string, maxLength: 80 } }
               usable_detail: { type: string, maxLength: 500 }
               uncertainty: { type: string, maxLength: 500 }
               category: { type: string, enum: [food, cafe, travel, other, unknown] }
               orientation: { type: string, enum: [landscape, portrait, square, unknown] }
+              analysis_provenance:
+                type: object
+                additionalProperties: false
+                description: Optional provenance for a new Vision insight; absent for local and legacy plans. The model description remains unverified.
+                required: [analysis_id, source, model, analyzed_at, content_version, sample_sha256]
+                properties:
+                  analysis_id: { type: string, format: uuid }
+                  source: { type: string, enum: [vision, vision_per_media, mock] }
+                  model: { type: [string, 'null'], maxLength: 100 }
+                  analyzed_at: { type: string, format: date-time }
+                  content_version: { type: [integer, 'null'], minimum: 1 }
+                  sample_sha256: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$', description: Hash of the reduced local sample; sample bytes are not stored here. }
         format: { type: string, const: vertical_short }
         aspect_ratio: { type: string, const: '9:16' }
         target_seconds: { type: integer, minimum: 3, maximum: 59 }
@@ -2254,6 +2389,18 @@ components:
               media_id: { type: string, format: uuid }
               caption_source: { type: string, enum: [vision, user, legacy_review] }
               caption_status: { type: string, enum: [needs_review] }
+              caption_kind: { type: string, enum: [observed_fact, user_information, emotional, narrative, unclassified], description: 'Model suggested content type, not a factual verification.' }
+              caption_review_reason: { type: string, enum: [visual_fact_unverified, user_fact_unverified, editorial_confirmation, kind_unclassified] }
+              caption_basis:
+                type: object
+                additionalProperties: false
+                description: Optional Vision evidence candidate for user review; absent for legacy or user edited captions.
+                required: [media_id, analysis_id, insight_description, model_evidence]
+                properties:
+                  media_id: { type: string, format: uuid }
+                  analysis_id: { type: [string, 'null'], format: uuid }
+                  insight_description: { type: string, maxLength: 500 }
+                  model_evidence: { type: string, maxLength: 240 }
               start_seconds: { type: number, minimum: 0 }
               end_seconds: { type: number, exclusiveMinimum: 0, maximum: 59 }
               text: { type: string, maxLength: 80 }
@@ -2380,6 +2527,66 @@ components:
         llm_calls: { type: integer, minimum: 0 }
         estimated_cost_usd: { type: number, minimum: 0 }
         gate_reason: { type: [string, 'null'] }
+        planning_source: { type: string, enum: [vision_text_plan, local_from_vision], description: Optional per-media Vision result; local composition is used when the task call limit leaves no story call. }
+        caption_refinement:
+          type: object
+          additionalProperties: false
+          description: Local request-to-caption check; does not mean a user supplied place or model observation was visually verified.
+          required: [requested_caption_added, repeated_location_prefixes_removed]
+          properties:
+            requested_caption_required: { type: boolean }
+            requested_caption_text: { type: [string, 'null'], maxLength: 80 }
+            requested_caption_added: { type: boolean }
+            requested_caption_reflected: { type: boolean }
+            requested_caption_unmet_reason: { type: [string, 'null'], enum: [PLACE_UNRECOGNIZED, NO_VALID_VISUAL_ANALYSIS, CAPTION_TIMELINE_UNAVAILABLE, null] }
+            repeated_location_prefixes_removed: { type: integer, minimum: 0 }
+            generic_location_captions_omitted: { type: integer, minimum: 0 }
+        caption_style_review:
+          type: object
+          additionalProperties: false
+          description: Local whole-video wording checks; photo meaning and naturalness still require user review.
+          required: [duplicate_captions_omitted, repeated_endings_for_review, formal_endings_for_review]
+          properties:
+            duplicate_captions_omitted: { type: integer, minimum: 0 }
+            repeated_endings_for_review: { type: integer, minimum: 0 }
+            formal_endings_for_review: { type: integer, minimum: 0 }
+        media_analysis:
+          type: array
+          description: Optional per-media Vision result in selected project order; photo descriptions still require user review.
+          items:
+            type: object
+            additionalProperties: false
+            required: [media_id, status]
+            properties:
+              media_id: { type: string, format: uuid }
+              status: { type: string, enum: [analyzed, cached, failed, skipped, unavailable] }
+              analysis_request_id: { type: string, format: uuid, description: Local per-image attempt identifier; not a provider request ID. }
+              reason: { type: string, description: Safe error code only; no media or provider response text. }
+              request_type: { type: string, enum: [per_media_vision] }
+              model: { type: [string, 'null'], maxLength: 100 }
+              response_status: { type: string, enum: [parsed_json, invalid_response, unavailable] }
+              diagnostic: { anyOf: [{ $ref: '#/components/schemas/VisionOutputDiagnostic' }, { type: 'null' }] }
+              caption_status: { type: string, enum: [needs_review, unavailable], description: Subtitle candidate status; separate from image analysis success. }
+              caption_reason: { type: string, description: Safe reason code for an unusable or absent subtitle candidate. }
+              caption_diagnostic: { $ref: '#/components/schemas/VisionOutputDiagnostic' }
+        story_analysis:
+          type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status: { type: string, enum: [skipped, applied, failed] }
+            calls: { type: integer, minimum: 0, maximum: 1, description: Locally reserved text-only story attempts. }
+            reason: { type: string, description: Safe failure code; no provider text. }
+            diagnostic: { anyOf: [{ $ref: '#/components/schemas/VisionOutputDiagnostic' }, { type: 'null' }] }
+        vision_call_plan:
+          type: object
+          additionalProperties: false
+          required: [required, cached]
+          properties:
+            required: { type: integer, minimum: 0, description: Uncached visual samples needing one call each. }
+            remaining: { type: integer, description: Remaining calls on the parent Creator task before this request. }
+            cached: { type: integer, minimum: 0 }
+            planning_call: { type: integer, enum: [0, 1] }
         validation_field: { type: string, enum: [PLAN_MISSING, SCENES_MEDIA_MISMATCH, CAPTIONS_FORMAT, CAPTIONS_UNUSABLE] }
         diagnostic:
           type: object
@@ -2399,6 +2606,28 @@ components:
             prepared_samples: { type: integer, minimum: 0 }
             prepared_bytes: { type: integer, minimum: 0 }
             preparation_failures: { type: integer, minimum: 0 }
+    VisionOutputDiagnostic:
+      type: object
+      additionalProperties: false
+      description: Safe field-level or provider diagnostic without image, prompt, or model output text.
+      properties:
+        validation_code: { type: string }
+        field_path: { type: string }
+        expected_type: { type: string }
+        actual_type: { type: string }
+        missing_required_fields: { type: array, items: { type: string } }
+        json_parse_succeeded: { type: [boolean, 'null'] }
+        output_truncated: { type: boolean }
+        provider_http_status: { type: [integer, 'null'], minimum: 100, maximum: 599 }
+        provider_request_id: { type: [string, 'null'], maxLength: 128 }
+        stage: { type: string, enum: [waiting_headers, reading_body, validating_output] }
+        elapsed_ms: { type: integer, minimum: 0 }
+        timeout_ms: { type: integer, minimum: 1000 }
+        request_bytes: { type: integer, minimum: 0 }
+        gateway_elapsed_ms: { type: integer, minimum: 0 }
+        request_started: { type: boolean }
+        headers_received: { type: boolean }
+        body_received: { type: boolean }
     Transcript:
       type: object
       additionalProperties: false
@@ -2776,6 +3005,42 @@ components:
             frequency: { type: string, enum: [daily, weekly, monthly] }
             interval: { type: integer, minimum: 1, maximum: 365 }
             until: { type: string, format: date }
+    GoogleScheduleEventInput:
+      type: object
+      additionalProperties: false
+      required: [title, all_day, time_zone]
+      description: Timed events require start_at/end_at with explicit offset; all-day events require start_date/end_date with exclusive end date. Recurrence creation and reminder changes are not supported.
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        all_day: { type: boolean }
+        time_zone: { type: string, minLength: 1, maxLength: 100, example: Asia/Seoul }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date, description: Exclusive end date for all-day events. }
+        location: { type: string, maxLength: 500 }
+        notes: { type: string, maxLength: 4000 }
+      oneOf:
+        - required: [start_date, end_date]
+          additionalProperties: false
+          properties:
+            title: {}
+            all_day: { const: true }
+            time_zone: {}
+            start_date: {}
+            end_date: {}
+            location: {}
+            notes: {}
+        - required: [start_at, end_at]
+          additionalProperties: false
+          properties:
+            title: {}
+            all_day: { const: false }
+            time_zone: {}
+            start_at: {}
+            end_at: {}
+            location: {}
+            notes: {}
     WellnessEntryInput:
       type: object
       additionalProperties: false

@@ -13,7 +13,7 @@ const seoulDate = () => {
   return `${value.year}-${value.month}-${value.day}`;
 };
 
-export function createApiHandler({ repositories, auth, webSessions = null, maxMediaBytes, renderCoordinator = null, capabilityRegistry = null, supervisorRouter = null, creatorAgent = null, llmGateway = null, llmAvailability = null, trends = null }) {
+export function createApiHandler({ repositories, auth, webSessions = null, maxMediaBytes, renderCoordinator = null, capabilityRegistry = null, supervisorRouter = null, creatorAgent = null, llmGateway = null, llmAvailability = null, trends = null, googleCalendar = null }) {
   const personal = new PersonalRecords(repositories.state);
   const localAssistant = new LocalAssistant(repositories.state, personal);
   const localBackups = repositories.dataDir ? new LocalBackups(repositories.dataDir) : null;
@@ -30,6 +30,13 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
       const url = new URL(request.url, 'http://127.0.0.1');
       if (!url.pathname.startsWith(`${API_PREFIX}/`)) return sendError(response, 404, 'RESOURCE_NOT_FOUND');
       const path = url.pathname.slice(API_PREFIX.length);
+      if (path === '/schedule/google/oauth/callback' && request.method === 'GET') {
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        const callback = new URL(googleCalendar.redirectUri);
+        if (callback.hostname !== '127.0.0.1' || request.headers.host !== callback.host || url.pathname !== callback.pathname)
+          return sendError(response, 403, 'OAUTH_STATE_INVALID');
+        return sendJson(response, 200, await googleCalendar.completeConnect(url.searchParams.get('state'), url.searchParams.get('code')));
+      }
       const cookieId = webCookie(request.headers.cookie);
       if (path === '/auth/web-session' && request.method === 'POST') {
         if (!webSessions || !validWebOrigin(request, true, webSessions.secureCookie)) return sendError(response, 403, 'CSRF_REJECTED');
@@ -127,6 +134,39 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
 
       if (path === '/schedule/occurrences' && request.method === 'GET') return sendJson(response, 200,
         personal.occurrences(principal.ownerId, url.searchParams.get('from'), url.searchParams.get('to')));
+      if (path === '/schedule/google/connection' && request.method === 'GET')
+        return sendJson(response, 200, googleCalendar?.status(principal.ownerId) ?? { configured: false, connected: false, status: 'disconnected', calendar_id: null });
+      if (path === '/schedule/google/connection/start' && request.method === 'POST') {
+        requireIdempotencyKey(request);
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        return sendJson(response, 201, googleCalendar.beginConnect(principal.ownerId));
+      }
+      if (path === '/schedule/google/connection' && request.method === 'DELETE') {
+        requireIdempotencyKey(request);
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        return sendJson(response, 200, await googleCalendar.disconnect(principal.ownerId));
+      }
+      if (path === '/schedule/google/events' && request.method === 'GET') {
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        return sendJson(response, 200, await googleCalendar.list(principal.ownerId,
+          url.searchParams.get('from'), url.searchParams.get('to'), url.searchParams.get('q') ?? ''));
+      }
+      let googleMatch = /^\/schedule\/google\/events\/([a-v0-9]{5,1024})$/.exec(path);
+      if (googleMatch && request.method === 'GET') {
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        return sendJson(response, 200, await googleCalendar.get(principal.ownerId, googleMatch[1]));
+      }
+      if (path === '/schedule/google/proposals' && request.method === 'POST') {
+        requireJson(request); requireIdempotencyKey(request);
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        return sendJson(response, 201, await googleCalendar.propose(principal.ownerId, await readJson(request), request.headers['idempotency-key']));
+      }
+      googleMatch = /^\/schedule\/google\/proposals\/([0-9a-f-]+)\/confirm$/.exec(path);
+      if (googleMatch && request.method === 'POST') {
+        requireIdempotencyKey(request);
+        if (!googleCalendar) return sendError(response, 503, 'GOOGLE_CALENDAR_NOT_CONFIGURED');
+        return sendJson(response, 200, await googleCalendar.confirm(principal.ownerId, googleMatch[1], request.headers['idempotency-key']));
+      }
       const proposalMatch = /^\/assistant\/proposals\/([0-9a-f-]+)\/confirm$/.exec(path);
       if (proposalMatch && request.method === 'POST') { requireIdempotencyKey(request);
         return sendJson(response, 200, localAssistant.confirm(principal.ownerId, proposalMatch[1], request.headers['idempotency-key'])); }
@@ -621,6 +661,16 @@ const SAFE_MESSAGES = {
   SERVICE_UNAVAILABLE: '요청을 처리할 수 없습니다.', TRANSCRIPT_CONFIRMATION_REQUIRED: '음성 인식문을 확인하고 수정한 뒤 다시 요청해 주세요.',
   LLM_BUDGET_EXCEEDED: 'LLM 사용 한도에 도달했습니다. 로컬 처리로 전환합니다.',
   RIGHTS_REVIEW_REQUIRED: '음원의 상업 이용 및 대상 플랫폼 권리를 확인해 주세요.',
+  GOOGLE_CALENDAR_NOT_CONFIGURED: 'Google Calendar 연결은 아직 설정되지 않았습니다.',
+  GOOGLE_CALENDAR_DISCONNECTED: 'Google Calendar 계정을 먼저 연결해 주세요.',
+  GOOGLE_CALENDAR_UNAVAILABLE: 'Google Calendar 응답을 받지 못했습니다. 일정 변경 결과를 확인해 주세요.',
+  DUPLICATE_EVENT: '같은 시간과 장소의 일정이 이미 있습니다. 기존 일정을 확인해 주세요.',
+  GOOGLE_RESPONSE_INVALID: 'Google Calendar 응답 형식을 확인할 수 없습니다.',
+  GOOGLE_OUTCOME_UNKNOWN: 'Google 일정 변경 결과가 불확실합니다. 재요청 전에 Google Calendar에서 확인해 주세요.',
+  OAUTH_STATE_INVALID: 'Google 연결 확인 정보가 만료되었거나 일치하지 않습니다.',
+  OAUTH_EXCHANGE_FAILED: 'Google 계정 연결을 완료하지 못했습니다.',
+  OAUTH_SCOPE_MISSING: '필요한 캘린더 권한을 확인할 수 없습니다.',
+  OAUTH_EXPIRED: 'Google 계정 인증이 만료되었습니다. 다시 연결해 주세요.',
 };
 
 function webCookie(header) {
