@@ -22,6 +22,9 @@ import { createFFmpegFrameExtractor } from '../../media-engine/ffmpeg-frame-extr
 import { createFFmpegImagePreparer } from '../../media-engine/ffmpeg-image-preparer.js';
 import { YouTubeTrends } from '../../application/youtube-trends.js';
 import { GoogleCalendarService } from '../../application/google-calendar-service.js';
+import { YouTubeProvider } from '../../application/youtube-provider.js';
+import { YouTubePublishingService } from '../../application/youtube-publishing-service.js';
+import { EncryptedTokenVault } from '../../security/encrypted-token-vault.js';
 
 const projectRoot = resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
 loadDotEnv(join(projectRoot, '.env'));
@@ -77,6 +80,20 @@ const trends = new YouTubeTrends({ apiKey: process.env.HAEJUMI_YOUTUBE_API_KEY |
   enabled: parseBoolean(process.env.HAEJUMI_TRENDS_LIVE_ENABLED, false) });
 // Mock-only phase: no live Google provider or OAuth credentials are loaded.
 const googleCalendar = new GoogleCalendarService({ state });
+const youtubeUploadEnabled = parseBoolean(process.env.HAEJUMI_YOUTUBE_UPLOAD_LIVE_ENABLED, false, 'HAEJUMI_YOUTUBE_UPLOAD_LIVE_ENABLED');
+let youtubeProvider = null, youtubeVault = null;
+if (youtubeUploadEnabled) {
+  const clientId = process.env.HAEJUMI_YOUTUBE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.HAEJUMI_YOUTUBE_OAUTH_CLIENT_SECRET;
+  const encodedKey = process.env.HAEJUMI_YOUTUBE_TOKEN_KEY_BASE64 ?? '';
+  const key = Buffer.from(encodedKey, 'base64');
+  if (!clientId?.endsWith('.apps.googleusercontent.com') || !clientSecret ||
+      !/^[A-Za-z0-9+/]{43}=$/.test(encodedKey) || key.length !== 32)
+    throw new Error('YouTube OAuth is enabled but server-side credentials or the 32-byte token key are missing.');
+  youtubeProvider = new YouTubeProvider({ clientId, clientSecret });
+  youtubeVault = new EncryptedTokenVault(safeStoragePath(dataDir, 'youtube-oauth-tokens.json'), key);
+}
+const youtubePublishing = new YouTubePublishingService({ state, repositories, provider: youtubeProvider, vault: youtubeVault });
 const renderDir = ensureStorageDirectory(safeStoragePath(dataDir, 'renders'), dataDir);
 const renderer = createFFmpegRenderer({ mediaRoot: repositories.blobDir, outputRoot: renderDir, ...mediaToolPaths });
 const renderCoordinator = createRenderCoordinator({ repositories, renderer });
@@ -92,16 +109,16 @@ const auth = {
   },
 };
 
-const server = createServer(createApiHandler({ repositories, auth, webSessions, maxMediaBytes, renderCoordinator, capabilityRegistry, supervisorRouter, creatorAgent, llmGateway, llmAvailability, trends, googleCalendar }));
+const server = createServer(createApiHandler({ repositories, auth, webSessions, maxMediaBytes, renderCoordinator, capabilityRegistry, supervisorRouter, creatorAgent, llmGateway, llmAvailability, trends, googleCalendar, youtubePublishing }));
 server.listen(Number(process.env.HAEJUMI_PORT || 8765), host, () => {
   process.stdout.write(`Haejumi reference backend listening on http://${host}:${server.address().port}\n`);
 });
 
-function parseBoolean(value, fallback) {
+function parseBoolean(value, fallback, setting = 'HAEJUMI_LLM_ENABLED') {
   if (value === undefined || value === '') return fallback;
   if (value === 'true') return true;
   if (value === 'false') return false;
-  throw new Error('Invalid HAEJUMI_LLM_ENABLED; use true or false.');
+  throw new Error(`Invalid ${setting}; use true or false.`);
 }
 function parseNumber(value, fallback) {
   if (value === undefined || value === '') return fallback;

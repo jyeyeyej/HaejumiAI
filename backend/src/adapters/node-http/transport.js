@@ -13,7 +13,7 @@ const seoulDate = () => {
   return `${value.year}-${value.month}-${value.day}`;
 };
 
-export function createApiHandler({ repositories, auth, webSessions = null, maxMediaBytes, renderCoordinator = null, capabilityRegistry = null, supervisorRouter = null, creatorAgent = null, llmGateway = null, llmAvailability = null, trends = null, googleCalendar = null }) {
+export function createApiHandler({ repositories, auth, webSessions = null, maxMediaBytes, renderCoordinator = null, capabilityRegistry = null, supervisorRouter = null, creatorAgent = null, llmGateway = null, llmAvailability = null, trends = null, googleCalendar = null, youtubePublishing = null }) {
   const personal = new PersonalRecords(repositories.state);
   const localAssistant = new LocalAssistant(repositories.state, personal);
   const localBackups = repositories.dataDir ? new LocalBackups(repositories.dataDir) : null;
@@ -37,6 +37,16 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
           return sendError(response, 403, 'OAUTH_STATE_INVALID');
         return sendJson(response, 200, await googleCalendar.completeConnect(url.searchParams.get('state'), url.searchParams.get('code')));
       }
+      if (path === '/publications/youtube/oauth/callback' && request.method === 'GET') {
+        if (!youtubePublishing) return sendError(response, 503, 'YOUTUBE_NOT_CONFIGURED');
+        const callback = new URL(youtubePublishing.redirectUri);
+        if (callback.hostname !== '127.0.0.1' || request.headers.host !== callback.host || url.pathname !== callback.pathname)
+          return sendError(response, 403, 'OAUTH_STATE_INVALID');
+        await youtubePublishing.callback(url.searchParams.get('state'), url.searchParams.get('code'));
+        response.writeHead(303, { Location: 'http://127.0.0.1:5173/', 'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' });
+        response.end(); return;
+      }
       const cookieId = webCookie(request.headers.cookie);
       if (path === '/auth/web-session' && request.method === 'POST') {
         if (!webSessions || !validWebOrigin(request, true, webSessions.secureCookie)) return sendError(response, 403, 'CSRF_REJECTED');
@@ -57,6 +67,28 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
         webSessions.revoke(cookieId);
         response.setHeader('Set-Cookie', webCookieHeader('', 0, request, webSessions.secureCookie));
         response.writeHead(204, { 'Cache-Control': 'no-store' }); response.end(); return;
+      }
+      if (path === '/publications/youtube/connection' && request.method === 'GET')
+        return sendJson(response, 200, youtubePublishing?.status(principal.ownerId) ?? { configured: false, connected: false, status: 'disconnected', channel_id: null, channel_title: null });
+      if (path === '/publications/youtube/connection/start' && request.method === 'POST') {
+        requireIdempotencyKey(request);
+        if (!youtubePublishing) return sendError(response, 503, 'YOUTUBE_NOT_CONFIGURED');
+        return sendJson(response, 201, youtubePublishing.begin(principal.ownerId, request.headers['idempotency-key']));
+      }
+      if (path === '/publications/youtube/connection' && request.method === 'DELETE') {
+        requireIdempotencyKey(request);
+        if (!youtubePublishing) return sendError(response, 503, 'YOUTUBE_NOT_CONFIGURED');
+        return sendJson(response, 200, await youtubePublishing.disconnect(principal.ownerId));
+      }
+      const youtubeUpload = /^\/tasks\/([0-9a-f-]+)\/publications\/([0-9a-f-]+)\/youtube-upload$/.exec(path);
+      if (youtubeUpload && request.method === 'GET') {
+        if (!youtubePublishing) return sendError(response, 503, 'YOUTUBE_NOT_CONFIGURED');
+        return sendJson(response, 200, youtubePublishing.list(principal.ownerId, youtubeUpload[1], youtubeUpload[2]));
+      }
+      if (youtubeUpload && request.method === 'POST') {
+        requireIdempotencyKey(request);
+        if (!youtubePublishing) return sendError(response, 503, 'YOUTUBE_NOT_CONFIGURED');
+        return sendJson(response, 200, await youtubePublishing.upload(principal.ownerId, youtubeUpload[1], youtubeUpload[2], request.headers['idempotency-key'], await readJson(request)));
       }
       const imagePreview = /^\/media\/([0-9a-f-]+)\/image-preview$/.exec(path);
       if (imagePreview && request.method === 'GET') {
@@ -669,8 +701,18 @@ const SAFE_MESSAGES = {
   GOOGLE_OUTCOME_UNKNOWN: 'Google 일정 변경 결과가 불확실합니다. 재요청 전에 Google Calendar에서 확인해 주세요.',
   OAUTH_STATE_INVALID: 'Google 연결 확인 정보가 만료되었거나 일치하지 않습니다.',
   OAUTH_EXCHANGE_FAILED: 'Google 계정 연결을 완료하지 못했습니다.',
-  OAUTH_SCOPE_MISSING: '필요한 캘린더 권한을 확인할 수 없습니다.',
+  OAUTH_SCOPE_MISSING: 'Google 연결에 필요한 권한을 확인할 수 없습니다.',
   OAUTH_EXPIRED: 'Google 계정 인증이 만료되었습니다. 다시 연결해 주세요.',
+  YOUTUBE_NOT_CONFIGURED: 'YouTube 업로드 연결이 아직 설정되지 않았습니다.',
+  YOUTUBE_DISCONNECTED: 'YouTube 채널을 먼저 연결해 주세요.',
+  YOUTUBE_CHANNEL_UNAVAILABLE: '연결된 YouTube 채널을 확인하지 못했습니다.',
+  YOUTUBE_CHANNEL_INVALID: 'YouTube 채널 응답 형식을 확인할 수 없습니다.',
+  YOUTUBE_CHANNEL_MISMATCH: '승인된 게시 계정과 연결된 YouTube 채널이 다릅니다.',
+  YOUTUBE_UPLOAD_IN_PROGRESS: '이 영상의 YouTube 업로드가 이미 진행 중입니다.',
+  YOUTUBE_METADATA_INVALID: 'YouTube 제목·설명·해시태그 길이와 문자를 확인해 주세요.',
+  YOUTUBE_AUDIENCE_REQUIRED: 'YouTube 업로드 전에 아동 대상 여부를 선택해 주세요.',
+  STALE_APPROVAL: '현재 영상과 게시 정보에 대한 최종 승인을 다시 확인해 주세요.',
+  YOUTUBE_OUTCOME_UNKNOWN: 'YouTube 업로드 결과가 불확실합니다. 새로 업로드하기 전에 채널에서 확인해 주세요.',
 };
 
 function webCookie(header) {

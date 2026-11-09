@@ -46,6 +46,14 @@ export class ApiError extends Error {
       code === 'VALIDATION_ERROR' && field === 'sha256' ? '파일 해시 정보가 올바르지 않습니다. 다시 선택해 주세요.' :
       code === 'VALIDATION_ERROR' && field === 'client_item_id' ? '파일 식별자가 올바르지 않습니다. 선택을 취소하고 다시 선택해 주세요.' :
       code === 'VALIDATION_ERROR' ? '업로드 요청 형식이 서버 검증을 통과하지 못했습니다. 서버와 웹을 최신 버전으로 다시 실행해 주세요.' :
+      code === 'YOUTUBE_NOT_CONFIGURED' ? 'YouTube OAuth 설정이 필요합니다.' :
+      code === 'YOUTUBE_DISCONNECTED' ? 'YouTube 채널을 먼저 연결해 주세요.' :
+      code === 'YOUTUBE_CHANNEL_MISMATCH' ? '최종 승인한 게시 계정과 현재 연결된 채널이 다릅니다.' :
+      code === 'YOUTUBE_UPLOAD_IN_PROGRESS' ? '이 영상의 업로드가 이미 진행 중입니다.' :
+      code === 'YOUTUBE_METADATA_INVALID' ? 'YouTube 제목은 100자 이하, 설명은 해시태그 포함 5000바이트 이하여야 합니다. 제목·설명에서 < 또는 > 문자를 제거해 주세요.' :
+      code === 'YOUTUBE_AUDIENCE_REQUIRED' ? 'YouTube 업로드 전에 아동 대상 여부를 선택해 주세요.' :
+      code === 'YOUTUBE_OUTCOME_UNKNOWN' ? '업로드 결과가 불확실합니다. YouTube 채널에서 영상 여부를 확인해 주세요. 자동 재시도는 차단했습니다.' :
+      code === 'STALE_APPROVAL' ? '영상 또는 게시 정보가 변경됐습니다. 최신 버전으로 다시 승인해 주세요.' :
       `서버 요청에 실패했습니다. (HTTP ${status})`);
     this.status = status;
     this.code = code;
@@ -157,6 +165,11 @@ export class HaejumiApi {
   createPublication(taskId, body, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(taskId)}/publications`, { method: 'POST', key, body }); }
   updatePublication(taskId, publicationId, body, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(taskId)}/publications/${safeId(publicationId)}`, { method: 'PATCH', key, body }); }
   approvePublication(taskId, publicationId, body, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(taskId)}/publications/${safeId(publicationId)}/approvals`, { method: 'POST', key, body }); }
+  youtubeConnection() { return this.request('/api/v1/publications/youtube/connection'); }
+  youtubeConnect(key = crypto.randomUUID()) { return this.request('/api/v1/publications/youtube/connection/start', { method: 'POST', key }); }
+  youtubeDisconnect(key = crypto.randomUUID()) { return this.request('/api/v1/publications/youtube/connection', { method: 'DELETE', key }); }
+  youtubeUploads(taskId, publicationId) { return this.request(`/api/v1/tasks/${safeId(taskId)}/publications/${safeId(publicationId)}/youtube-upload`); }
+  youtubeUpload(taskId, publicationId, madeForKids, key = crypto.randomUUID()) { return this.request(`/api/v1/tasks/${safeId(taskId)}/publications/${safeId(publicationId)}/youtube-upload`, { method: 'POST', key, body: { made_for_kids: madeForKids } }); }
 
   async upload(file, { signal, onStep = () => {}, keys = {} } = {}) {
     checkFile(file);

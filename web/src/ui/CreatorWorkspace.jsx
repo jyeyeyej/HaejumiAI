@@ -317,17 +317,55 @@ function PublicationEditor({ api, taskId, task, job, platform, publication, sugg
   const [title, setTitle] = useState(publication?.title ?? '');
   const [description, setDescription] = useState(publication?.description ?? '');
   const [tags, setTags] = useState(publication?.hashtags?.join(', ') ?? '');
+  const [youtube, setYoutube] = useState(null);
+  const [youtubeUploads, setYoutubeUploads] = useState([]);
+  const [youtubeBusy, setYoutubeBusy] = useState(false);
+  const [youtubeError, setYoutubeError] = useState('');
+  const [youtubeAudience, setYoutubeAudience] = useState('');
+  useEffect(() => {
+    if (platform !== 'youtube') return;
+    let active = true;
+    Promise.all([api.youtubeConnection(), publication ? api.youtubeUploads(taskId, publication.publication_id) : Promise.resolve({ items: [] })])
+      .then(([connection, uploads]) => { if (active) { setYoutube(connection); setYoutubeUploads(uploads.items); } })
+      .catch((error) => { if (active) setYoutubeError(error.message); });
+    return () => { active = false; };
+  }, [api, platform, publication?.publication_id, taskId]);
+  const youtubeAction = async (action) => {
+    setYoutubeBusy(true); setYoutubeError('');
+    try {
+      await action();
+      setYoutube(await api.youtubeConnection());
+      if (publication) setYoutubeUploads((await api.youtubeUploads(taskId, publication.publication_id)).items);
+    } catch (error) { setYoutubeError(error.message); }
+    finally { setYoutubeBusy(false); }
+  };
   const body = { platform, account_id: account.trim(), visibility, title: title.trim(), description: description.trim(),
     hashtags: tags.split(',').map((tag) => tag.trim().replace(/^#/, '')).filter(Boolean) };
   const changed = publication && JSON.stringify(body) !== JSON.stringify(Object.fromEntries(Object.keys(body).map((field) => [field, publication[field]])));
-  const valid = body.account_id.length > 0 && body.account_id.length <= 128 && body.title.length <= 200 && body.description.length <= 5000 && body.hashtags.length <= 30 && body.hashtags.every((tag) => tag.length <= 100);
+  const youtubeDescription = [body.description, body.hashtags.map((tag) => `#${tag.replace(/\s+/g, '')}`).join(' ')].filter(Boolean).join('\n\n');
+  const valid = body.account_id.length > 0 && body.account_id.length <= 128 && body.title.length <= 200 && body.description.length <= 5000 && body.hashtags.length <= 30 && body.hashtags.every((tag) => tag.length <= 100) &&
+    (platform !== 'youtube' || (body.title.length > 0 && Array.from(body.title).length <= 100 && !/[<>]/.test(body.title + youtubeDescription) && new TextEncoder().encode(youtubeDescription).length <= 5000));
   const label = { youtube: 'YouTube Shorts', tiktok: 'TikTok', instagram: 'Instagram Reels' }[platform];
   return <details className="publication-card workspace-disclosure"><summary>{label}<small>{publication ? `버전 ${publication.revision} · ${publication.status === 'publish_ready' ? '최종 승인됨' : '승인 대기'}` : '게시 정보 입력 필요'}</small></summary><div className="publication-fields">
     {suggestion?.title ? <><button className="secondary" disabled={busy} onClick={() => { setTitle(suggestion.title); setDescription(suggestion.description); setTags(suggestion.hashtags.join(', ')); }}>분석 기반 게시 문구 초안 가져오기</button><p className="muted">장면 분석의 분류·피사체를 바탕으로 만든 초안입니다. 실제 내용과 권리를 확인하고 수정해 주세요.</p></>
       : <p className="warning">확인된 시각 분석 정보가 없어 게시 문구를 자동 작성하지 않았습니다. 제목·설명·해시태그를 직접 입력해 주세요.</p>}
+    {platform === 'youtube' && <div className="publication-connection">
+      <p><strong>YouTube 채널</strong> · {!youtube ? '확인 중' : youtube.connected ? `${youtube.channel_title} (${youtube.channel_id})` : youtube.configured ? '연결되지 않음' : '서버 OAuth 설정 필요'}</p>
+      {youtube?.configured && <div className="button-row">{youtube.connected ? <>
+        <button className="secondary" disabled={youtubeBusy || busy} onClick={() => setAccount(youtube.channel_id)}>이 채널을 게시 계정으로 사용</button>
+        <button className="secondary" disabled={youtubeBusy || busy} onClick={() => youtubeAction(() => api.youtubeDisconnect())}>채널 연결 해제</button>
+      </> : <button className="secondary" disabled={youtubeBusy || busy} onClick={() => youtubeAction(async () => {
+        const result = await api.youtubeConnect();
+        const target = new URL(result.authorization_url);
+        if (target.protocol !== 'https:' || target.hostname !== 'accounts.google.com') throw new Error('Google 연결 주소를 확인할 수 없습니다.');
+        window.location.assign(target.href);
+      })}>Google 계정 연결</button>}</div>}
+      {youtubeError && <p className="warning" role="alert">{youtubeError}</p>}
+    </div>}
     <label>게시 계정 <input value={account} maxLength="128" onChange={(event) => setAccount(event.target.value)} /></label>
-    <label>공개범위 <select value={visibility} onChange={(event) => setVisibility(event.target.value)}><option value="private">비공개</option><option value="unlisted">일부 공개</option><option value="followers">팔로워</option><option value="public">전체 공개</option></select></label>
+    <label>공개범위 <select value={visibility} onChange={(event) => setVisibility(event.target.value)}><option value="private">비공개</option><option value="unlisted">일부 공개</option>{platform !== 'youtube' && <option value="followers">팔로워</option>}<option value="public">전체 공개</option></select></label>
     <label>제목 <input value={title} maxLength="200" onChange={(event) => setTitle(event.target.value)} /></label>
+    {platform === 'youtube' && <p className="muted">YouTube 제목은 100자 이하, 설명은 해시태그 포함 UTF-8 5000바이트 이하로 작성해 주세요.</p>}
     <label>설명 <textarea value={description} maxLength="5000" onChange={(event) => setDescription(event.target.value)} /></label>
     <label>해시태그(쉼표로 구분) <input value={tags} onChange={(event) => setTags(event.target.value)} /></label>
     <div className="button-row"><button disabled={busy || !valid || (publication && !changed)} onClick={() => run(() => publication
@@ -337,6 +375,16 @@ function PublicationEditor({ api, taskId, task, job, platform, publication, sugg
         onClick={() => run(() => api.approvePublication(taskId, publication.publication_id, { content_version: task.current_version, content_hash: task.content_hash,
           artifact_sha256: job.artifact_sha256, publication_revision: publication.revision, publication_hash: publication.metadata_hash },
         keyFor(`publication:approve:${publication.publication_id}:${publication.revision}:${task.current_version}`)), '현재 영상과 이 플랫폼 게시 정보를 최종 승인했습니다. 실제 게시는 실행되지 않았습니다.')}>이 플랫폼 최종 승인</button>}</div>
+    {platform === 'youtube' && <div className="publication-upload">
+      <p className="muted">YouTube 전송은 최종 승인 후 아래 버튼을 직접 눌러야 시작됩니다. 비공개로 시험하려면 게시 정보의 공개범위를 비공개로 저장하고 다시 승인해 주세요.</p>
+      <label>아동 대상 여부 <select value={youtubeAudience} onChange={(event) => setYoutubeAudience(event.target.value)}>
+        <option value="">선택해 주세요</option><option value="no">아동용 아님</option><option value="yes">아동용</option>
+      </select></label>
+      <button disabled={busy || youtubeBusy || !youtube?.connected || !publication || publication.status !== 'publish_ready' || changed || !previewApproved || !verified(task, job) || account.trim() !== youtube?.channel_id || !youtubeAudience}
+        onClick={() => youtubeAction(() => api.youtubeUpload(taskId, publication.publication_id, youtubeAudience === 'yes'))}>승인된 MP4를 YouTube에 업로드</button>
+      {youtubeUploads.map((item) => <p key={item.upload_id}>{item.status === 'succeeded' ? <a href={item.url} target="_blank" rel="noopener noreferrer">업로드 완료 · YouTube 영상 보기</a> :
+        item.status === 'outcome_unknown' ? '업로드 결과 불확실 · YouTube 채널에서 확인 필요' : '업로드 진행 중'}</p>)}
+    </div>}
   </div></details>;
 }
 

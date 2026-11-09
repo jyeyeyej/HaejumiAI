@@ -53,6 +53,31 @@ test('publication metadata and final approval use owner-authenticated API withou
   assert.equal(JSON.parse(calls[2].options.body).artifact_sha256, 'b'.repeat(64));
 });
 
+test('YouTube connection and upload use local authenticated endpoints and explicit write keys', async () => {
+  const calls = [];
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const api = HaejumiApi.webSession(async (path, options) => {
+    calls.push({ path, options }); return Response.json({ items: [] });
+  });
+  await api.youtubeConnection();
+  await api.youtubeConnect('youtube-connect-key-001');
+  await api.youtubeUploads(id, id);
+  await api.youtubeUpload(id, id, false, 'youtube-upload-key-001');
+  await api.youtubeDisconnect('youtube-disconnect-key-001');
+  assert.deepEqual(calls.map((call) => [call.options.method, call.path]), [
+    ['GET', '/api/v1/publications/youtube/connection'],
+    ['POST', '/api/v1/publications/youtube/connection/start'],
+    ['GET', `/api/v1/tasks/${id}/publications/${id}/youtube-upload`],
+    ['POST', `/api/v1/tasks/${id}/publications/${id}/youtube-upload`],
+    ['DELETE', '/api/v1/publications/youtube/connection'],
+  ]);
+  assert.equal(calls.filter((call) => call.options.method !== 'GET').every((call) =>
+    call.options.headers['X-Haejumi-Web'] === '1' && call.options.headers['Idempotency-Key'] &&
+    call.options.credentials === 'same-origin'), true);
+  assert.equal(calls.every((call) => !call.options.headers.Authorization), true);
+  assert.deepEqual(JSON.parse(calls[3].options.body), { made_for_kids: false });
+});
+
 test('privacy notice, consent and usage requests stay on the authenticated local API', async () => {
   const calls = [];
   const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';

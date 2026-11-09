@@ -182,7 +182,11 @@ Vision 응답의 `media_insights`는 배열 위치가 아닌 `media_id`로 연�
 
 JSON 기반 Creator의 `DELETE /content/projects/{project_id}`는 인증된 소유자의 현재 `content_version`·`content_hash`와 `Idempotency-Key`를 요구합니다. 렌더 작업이 대기·진행 중이면 409로 거부합니다. 프로젝트와 연결된 작업·체크포인트·승인·게시 정보·렌더 기록·관련 멱등 기록만 삭제하고 공유 업로드 미디어, 로컬 렌더 파일, AI 예산·동의·다른 Agent 기록은 보존합니다. 이전 렌더 파일은 파일 시스템에 남지만 프로젝트가 삭제되면 API 미리보기로 접근할 수 없습니다. 파일 정리 정책은 별도 설계가 필요합니다. PostgreSQL 구현에는 이 삭제 메서드가 아직 반영되지 않았습니다.
 
-현재 기능은 게시 정보 저장과 승인 상태 관리까지만 합니다. 실제 SNS API 호출과 게시 실행은 없습니다. 공개범위의 플랫폼별 공식 API 매핑은 검증 대기입니다.
+YouTube는 별도 OAuth·업로드 경로를 추가했습니다. `GET /publications/youtube/connection`은 토큰 없이 연결 상태·채널 ID/이름만 반환합니다. `POST /publications/youtube/connection/start`는 인증과 멱등 키를 요구하고 10분짜리 state·PKCE S256으로 Google 인증 주소를 만듭니다. 등록된 `http://127.0.0.1:8765/api/v1/publications/youtube/oauth/callback`은 state, 콜백 호스트, 업로드 권한을 확인하고 토큰을 별도 AES-256-GCM 파일에 저장한 뒤 웹으로 되돌립니다. `DELETE /publications/youtube/connection`은 로컬 토큰을 폐기하고 Google 철회를 시도합니다. 설정이 없으면 연결과 업로드는 503으로 차단됩니다.
+
+사용자가 웹에서 아동 대상 여부를 고른 뒤 별도 업로드 버튼을 누르면 `POST /tasks/{task_id}/publications/{publication_id}/youtube-upload`가 현재 소유권·채널·최종 승인·영상/게시 버전·미리보기·FFmpeg/ffprobe 검증·MP4 SHA-256·BGM과 원음 권리를 다시 검사합니다. 요청의 `made_for_kids` Boolean은 YouTube `status.selfDeclaredMadeForKids`로 전달됩니다. 승인된 YouTube 공개범위는 `private`, `unlisted`, `public`입니다. YouTube 제목 100자·설명 UTF-8 5000바이트·태그 총 500자 제한을 전송 전에 검사하고, 승인된 해시태그는 설명 말미에도 붙입니다. 의미상 같은 승인·파일·채널은 한 번만 전송하며, 결과가 불확실하면 `outcome_unknown`을 보존하고 자동 재시도하지 않습니다. `GET` 같은 경로에서 시도 이력을 확인합니다. 성공한 경우에만 YouTube 영상 ID와 링크를 표시합니다. 현재 라이브 스위치는 기본 `false`이며 실제 Google 로그인·업로드는 아직 검증하지 않았습니다. Instagram/TikTok 자동 게시는 구현하지 않았습니다.
+
+서버 설정은 `.env`의 `HAEJUMI_YOUTUBE_OAUTH_CLIENT_ID`, `HAEJUMI_YOUTUBE_OAUTH_CLIENT_SECRET`, `HAEJUMI_YOUTUBE_TOKEN_KEY_BASE64`(32바이트 난수의 Base64), `HAEJUMI_YOUTUBE_UPLOAD_LIVE_ENABLED`를 사용합니다. 이 키와 암호화된 토큰 파일을 별도로 안전하게 백업해야 연결을 유지할 수 있습니다. PC 웹은 `http://127.0.0.1:5173/`로 접속합니다. 실제 연결 전에는 Google OAuth 테스트 사용자·채널 선택·권한·할당량과 비공개 업로드 결과를 확인해야 합니다.
 
 ## Capability Registry와 미래 Agent
 

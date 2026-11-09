@@ -1251,7 +1251,7 @@ paths:
       tags: [Publishing, Approvals]
       operationId: approvePublicationTarget
       summary: Explicitly approve one exact platform publication target
-      description: Requires a current ffprobe-verified real FFmpeg artifact and an approved preview. Selected music and any audible source-video audio require explicit user rights verification, commercial permission, evidence, platform permission and required attribution in the publication description. Binds task version/hash, artifact hash, publication revision/hash, platform, account, visibility and text. Approval only changes metadata state to publish_ready; no SNS API call or post is implemented. Other asset rights checks remain incomplete.
+      description: Requires a current ffprobe-verified real FFmpeg artifact and an approved preview. Selected music and any audible source-video audio require explicit user rights verification, commercial permission, evidence, platform permission and required attribution in the publication description. Binds task version/hash, artifact hash, publication revision/hash, platform, account, visibility and text. Approval only changes metadata state to publish_ready; it does not post. A separate explicit YouTube upload request is available when configured. Other asset rights checks remain incomplete.
       parameters:
         - $ref: '#/components/parameters/TaskId'
         - $ref: '#/components/parameters/PublicationId'
@@ -1273,6 +1273,115 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/ValidationError' }
         default: { $ref: '#/components/responses/Error' }
+  /publications/youtube/connection:
+    get:
+      tags: [Publishing]
+      operationId: getYouTubeConnection
+      summary: Read the owned YouTube channel connection without returning tokens
+      responses:
+        '200':
+          description: Local connection state; no Google request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YouTubeConnection' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Publishing]
+      operationId: disconnectYouTube
+      summary: Delete local encrypted credentials and disable this channel connection
+      description: Revocation is attempted with Google when available; local access is disabled even if revocation fails.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Disconnected without deleting publication or upload history
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YouTubeConnection' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: YouTube OAuth is not configured }
+  /publications/youtube/connection/start:
+    post:
+      tags: [Publishing]
+      operationId: startYouTubeConnection
+      summary: Begin Google OAuth using one-time state and PKCE
+      description: Requires server-side client credentials and an explicitly enabled live switch. No Google request is sent until the browser follows the returned authorization URL.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Google authorization URL and ten-minute state lifetime
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorization_url, expires_in_seconds]
+                properties:
+                  authorization_url: { type: string, format: uri }
+                  expires_in_seconds: { type: integer, const: 600 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: YouTube OAuth is not configured }
+  /publications/youtube/oauth/callback:
+    get:
+      tags: [Publishing]
+      operationId: completeYouTubeConnection
+      summary: Validate one-time state and exchange a Google authorization code
+      description: Exact 127.0.0.1 loopback callback; redirects to the local web app without putting tokens or codes in the URL.
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, required: true, schema: { type: string } }
+      responses:
+        '303': { description: Connected and redirected to the local web app }
+        '403': { description: State or upload scope is invalid }
+        '503': { description: Google exchange or channel lookup failed }
+  /tasks/{task_id}/publications/{publication_id}/youtube-upload:
+    get:
+      tags: [Publishing]
+      operationId: listYouTubeUploads
+      summary: List owner-scoped upload attempts for one YouTube publication
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/PublicationId'
+      responses:
+        '200':
+          description: Upload history; unknown outcomes require manual channel inspection
+          content:
+            application/json:
+              schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/YouTubeUpload' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Publishing]
+      operationId: uploadApprovedYouTubeVideo
+      summary: Explicitly upload the current approved MP4 to its approved YouTube channel
+      description: Rechecks ownership, current task and publication versions, final approval, preview, verified FFmpeg artifact and SHA-256, music and audible source rights, and the OAuth channel. One semantic upload per approval and artifact; uncertain outcomes block automatic retry. Live Google calls are disabled by default.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/PublicationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [made_for_kids]
+              properties:
+                made_for_kids: { type: boolean, description: Explicit audience selection for YouTube status.selfDeclaredMadeForKids. }
+      responses:
+        '200':
+          description: Upload result or prior semantic attempt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YouTubeUpload' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { description: Provider unavailable or upload outcome uncertain }
   /tasks/{task_id}/render:
     post:
       tags: [Rendering]
@@ -2875,6 +2984,31 @@ components:
     PublishPlatform:
       type: string
       enum: [youtube, instagram, tiktok]
+    YouTubeConnection:
+      type: object
+      required: [configured, connected, status, channel_id, channel_title]
+      properties:
+        configured: { type: boolean }
+        connected: { type: boolean }
+        status: { type: string, enum: [unconfigured, connected, disconnected, reauth_required] }
+        channel_id: { type: [string, 'null'] }
+        channel_title: { type: [string, 'null'] }
+    YouTubeUpload:
+      type: object
+      required: [upload_id, task_id, publication_id, status, channel_id, content_version, made_for_kids, artifact_sha256, video_id, url, created_at, completed_at]
+      properties:
+        upload_id: { type: string, format: uuid }
+        task_id: { type: string, format: uuid }
+        publication_id: { type: string, format: uuid }
+        status: { type: string, enum: [uploading, succeeded, outcome_unknown] }
+        channel_id: { type: string }
+        content_version: { type: integer, minimum: 1 }
+        made_for_kids: { type: boolean }
+        artifact_sha256: { $ref: '#/components/schemas/Sha256' }
+        video_id: { type: [string, 'null'] }
+        url: { type: [string, 'null'], format: uri }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
     PublicationInput:
       type: object
       additionalProperties: false

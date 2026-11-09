@@ -1181,17 +1181,7 @@ export class LocalRepositories {
         Object.entries(expected).some(([key, value]) => input[key] !== value)) throw apiError(409, 'VERSION_CONFLICT', '승인 대상 영상 또는 게시 정보가 현재 버전과 일치하지 않습니다.');
     const project = this.state.data.projects[task.project_id];
     if (!project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '프로젝트를 찾을 수 없습니다.');
-    if (project.composition?.music_track_id) this.musicLibrary.assertPublishable(ownerId, project.composition.music_track_id, publication.platform, publication);
-    if (project.composition && project.composition.source_volume > 0) {
-      if (!Array.isArray(job.source_audio_media_ids)) throw apiError(403, 'RIGHTS_REVIEW_REQUIRED', '원본 오디오의 권리를 확인해 주세요.');
-      for (const mediaId of job.source_audio_media_ids) {
-        const rights = project.composition.source_audio_rights?.find((r) => r.media_id === mediaId);
-        if (!project.media_ids.includes(mediaId) || this.state.data.media[mediaId]?.ownerId !== ownerId || !rights?.explicitly_verified || !rights.commercial_allowed || !rights.evidence?.trim() || !rights.platforms?.includes(publication.platform) ||
-            (rights.attribution_required && (!rights.required_attribution?.trim() || !publication.description.includes(rights.required_attribution)))) {
-          throw apiError(403, 'RIGHTS_REVIEW_REQUIRED', '원본 오디오의 상업 이용 및 대상 플랫폼 권리를 확인해 주세요.');
-        }
-      }
-    }
+    this.assertPublicationRights(ownerId, project, job, publication);
     const fingerprint = JSON.stringify({ task_id: taskId, publication_id: publicationId, platform: publication.platform, account_id: publication.account_id,
       visibility: publication.visibility, title: publication.title, description: publication.description, hashtags: publication.hashtags, ...expected });
     const key = `${ownerId}:publication-approval:${idempotencyKey}`;
@@ -1218,6 +1208,50 @@ export class LocalRepositories {
     this.state.data.idempotency[semanticKey] = { fingerprint, approvalId: approval.approval_id };
     this.state.save();
     return structuredClone(approval);
+  }
+
+  assertPublicationRights(ownerId, project, job, publication) {
+    if (project.composition?.music_track_id) this.musicLibrary.assertPublishable(ownerId, project.composition.music_track_id, publication.platform, publication);
+    if (project.composition && project.composition.source_volume > 0) {
+      if (!Array.isArray(job.source_audio_media_ids)) throw apiError(403, 'RIGHTS_REVIEW_REQUIRED', '원본 오디오의 권리를 확인해 주세요.');
+      for (const mediaId of job.source_audio_media_ids) {
+        const rights = project.composition.source_audio_rights?.find((r) => r.media_id === mediaId);
+        if (!project.media_ids.includes(mediaId) || this.state.data.media[mediaId]?.ownerId !== ownerId || !rights?.explicitly_verified || !rights.commercial_allowed || !rights.evidence?.trim() || !rights.platforms?.includes(publication.platform) ||
+            (rights.attribution_required && (!rights.required_attribution?.trim() || !publication.description.includes(rights.required_attribution)))) {
+          throw apiError(403, 'RIGHTS_REVIEW_REQUIRED', '원본 오디오의 상업 이용 및 대상 플랫폼 권리를 확인해 주세요.');
+        }
+      }
+    }
+  }
+
+  getApprovedYouTubeUpload(ownerId, taskId, publicationId) {
+    const task = this.state.data.tasks[taskId], publication = this.state.data.publications[publicationId];
+    if (!task || task.ownerId !== ownerId || !publication || publication.owner_id !== ownerId || publication.task_id !== taskId || publication.platform !== 'youtube')
+      throw apiError(404, 'RESOURCE_NOT_FOUND', '리소스를 찾을 수 없습니다.');
+    this.invalidateStalePublicationApprovals(task);
+    const approval = this.state.data.approvals[publication.approval_id];
+    if (publication.status !== 'publish_ready' || !approval || approval.status !== 'active' || approval.approval_scope !== 'final_publish' ||
+        approval.platform !== 'youtube' || approval.task_id !== taskId || approval.publication_id !== publicationId ||
+        approval.account_id !== publication.account_id || approval.visibility !== publication.visibility ||
+        approval.title !== publication.title || approval.description !== publication.description ||
+        JSON.stringify(approval.hashtags) !== JSON.stringify(publication.hashtags) ||
+        approval.publication_revision !== publication.revision || approval.publication_hash !== publication.metadata_hash ||
+        approval.content_version !== task.current_version || approval.content_hash !== task.content_hash || task.status !== 'preview_approved')
+      throw apiError(409, 'STALE_APPROVAL', '현재 영상과 게시 정보의 최종 승인이 필요합니다.');
+    const job = Object.values(this.state.data.jobs).find((item) => item.task_id === taskId && item.owner_id === ownerId &&
+      item.status === 'succeeded' && item.renderer_mode === 'ffmpeg' && item.artifact_verified === true &&
+      item.content_version === task.current_version && item.content_hash === task.content_hash && item.artifact_sha256 === approval.artifact_sha256);
+    const preview = Object.values(this.state.data.checkpoints).find((item) => item.task_id === taskId && item.kind === 'preview' &&
+      item.status === 'approved' && item.content_version === task.current_version && item.content_hash === task.content_hash);
+    if (!job || !preview || this.state.data.approvals[preview.approval_id]?.status !== 'active' ||
+        this.state.data.approvals[preview.approval_id]?.approval_scope !== 'continue' ||
+        typeof job.artifact_key !== 'string') throw apiError(409, 'RENDER_REQUIRED', '검증된 MP4와 미리보기 승인이 필요합니다.');
+    const project = this.state.data.projects[task.project_id];
+    if (!project || project.ownerId !== ownerId) throw apiError(404, 'RESOURCE_NOT_FOUND', '프로젝트를 찾을 수 없습니다.');
+    this.assertPublicationRights(ownerId, project, job, publication);
+    const bytes = readRegularFile(safeStoragePath(this.renderDir, job.artifact_key));
+    if (sha256(bytes) !== approval.artifact_sha256) throw apiError(409, 'VERSION_CONFLICT', '승인된 MP4의 해시가 변경되었습니다.');
+    return { bytes, approval: structuredClone(approval), publication: publicPublication(publication) };
   }
 
   createRenderJob(ownerId, taskId, input, idempotencyKey) {

@@ -35,6 +35,12 @@
 - TikTok Direct Post: https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
 - Instagram 게시: https://developers.facebook.com/docs/instagram-platform/content-publishing
 
+## 2026-11-09 YouTube 구현 상태
+
+- 사용자 지정 Google 웹 OAuth 클라이언트의 로컬 콜백에 맞춰 state·PKCE, 서버 암호화 토큰 저장·갱신·연결 해제, 연결 채널 확인 코드를 추가했습니다. OAuth 권한은 `youtube.upload`만 요청합니다.
+- 승인된 MP4에 한해 별도 명시적 버튼에서 `videos.insert` 재개 가능 업로드를 시작합니다. 게시 정보, 채널 ID, 영상 해시와 현재 최종 승인을 요청 직전에 다시 검사합니다. 응답 불명 시 중복 업로드를 막고 채널에서 수동 확인하도록 표시합니다.
+- 기본 라이브 스위치는 꺼져 있습니다. Mock만 검증했으며 실제 Google 계정 연결, 권한 승인, 비공개 업로드, 공개범위·쿼터 결과는 미검증입니다. Instagram·TikTok 자동 게시도 미구현입니다.
+
 ## 개발 전 확인표
 - [ ] 연결할 채널 유형/권한 확인
 - [ ] 앱 등록·심사/검증·OAuth redirect URI 구성
