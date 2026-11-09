@@ -27,9 +27,26 @@ function Assert-OwnedProcess([int]$processId) {
     }
 }
 
+function Read-BackendState([string]$path) {
+    try {
+        $json = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        throw 'HAEJUMI_STATE_READ_FAILED: 작업 상태 파일을 읽을 수 없어 서버를 중지하지 않았습니다.'
+    }
+    try {
+        $state = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+        if ($null -eq $state -or $null -eq $state.jobs -or $state.jobs -isnot [pscustomobject]) {
+            throw 'Invalid jobs structure'
+        }
+        return $state
+    } catch {
+        throw 'HAEJUMI_STATE_INVALID: 작업 상태를 확인할 수 없어 서버를 중지하지 않았습니다.'
+    }
+}
+
 function Stop-LocalServer {
     if ($Service -eq 'backend') {
-        $state = Get-Content 'C:\HaejumiAI\data\state.json' -Raw | ConvertFrom-Json
+        $state = Read-BackendState 'C:\HaejumiAI\data\state.json'
         $active = @($state.jobs.PSObject.Properties.Value | Where-Object { $_.status -in @('queued', 'running') })
         if ($active.Count) { throw 'An active render job exists; backend was not stopped.' }
     }
