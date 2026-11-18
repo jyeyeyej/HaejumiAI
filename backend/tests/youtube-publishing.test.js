@@ -9,7 +9,7 @@ import { JsonState } from '../src/adapters/filesystem/json-state.js';
 import { LocalRepositories } from '../src/adapters/filesystem/repositories.js';
 import { createApiHandler } from '../src/adapters/node-http/transport.js';
 import { EncryptedTokenVault } from '../src/security/encrypted-token-vault.js';
-import { YouTubeProvider, UPLOAD_SCOPE } from '../src/application/youtube-provider.js';
+import { YouTubeProvider, UPLOAD_SCOPE, CHANNEL_READ_SCOPE } from '../src/application/youtube-provider.js';
 import { YouTubePublishingService } from '../src/application/youtube-publishing-service.js';
 
 const channelId = 'UC' + 'a'.repeat(22);
@@ -30,8 +30,8 @@ function fixture(t, { upload = async () => ({ video_id: 'abcdefghijk' }), gate =
     authorizationUrl: ({ state, challenge, redirectUri }) =>
       `https://accounts.google.com/o/oauth2/v2/auth?state=${state}&code_challenge=${challenge}&redirect_uri=${encodeURIComponent(redirectUri)}`,
     async exchangeCode({ verifier }) { calls.exchange++; assert.ok(verifier.length >= 43);
-      return { access_token: 'mock-access', refresh_token: 'mock-refresh', expires_at: Date.now() + 3600_000, scopes: [UPLOAD_SCOPE] }; },
-    async refresh() { calls.refresh++; return { access_token: 'mock-refreshed', expires_at: Date.now() + 3600_000, scopes: [UPLOAD_SCOPE] }; },
+      return { access_token: 'mock-access', refresh_token: 'mock-refresh', expires_at: Date.now() + 3600_000, scopes: [UPLOAD_SCOPE, CHANNEL_READ_SCOPE] }; },
+    async refresh() { calls.refresh++; return { access_token: 'mock-refreshed', expires_at: Date.now() + 3600_000, scopes: [UPLOAD_SCOPE, CHANNEL_READ_SCOPE] }; },
     async channel() { calls.channel++; return { channel_id: channelId, channel_title: '테스트 채널' }; },
     async upload(input) { calls.upload++; assert.equal(input.visibility, 'private'); assert.equal(input.madeForKids, false); assert.match(input.description, /#테스트/); return upload(input); },
     async revoke() { calls.revoke++; },
@@ -75,6 +75,9 @@ test('OAuth state, PKCE, scope and encrypted vault isolate the account', async (
   provider.exchangeCode = async () => ({ access_token: 'mock', refresh_token: 'mock', expires_at: Date.now() + 10000, scopes: [] });
   const missingScope = service.begin(owner);
   await assert.rejects(service.callback(new URL(missingScope.authorization_url).searchParams.get('state'), 'code'), { code: 'OAUTH_SCOPE_MISSING' });
+  provider.exchangeCode = async () => ({ access_token: 'mock', refresh_token: 'mock', expires_at: Date.now() + 10000, scopes: [UPLOAD_SCOPE] });
+  const missingChannelRead = service.begin(owner);
+  await assert.rejects(service.callback(new URL(missingChannelRead.authorization_url).searchParams.get('state'), 'code'), { code: 'OAUTH_SCOPE_MISSING' });
 });
 
 test('upload requires approval, matching channel, ownership and idempotency', async (t) => {
@@ -152,13 +155,13 @@ test('network adapter builds official OAuth and resumable upload requests using 
   const provider = new YouTubeProvider({ clientId: 'mock.apps.googleusercontent.com', clientSecret: 'mock-secret',
     fetcher: async (url, options) => {
       requests.push({ url, options });
-      if (url.includes('/token')) return { ok: true, json: async () => ({ access_token: 'access', refresh_token: 'refresh', expires_in: 3600, scope: UPLOAD_SCOPE }) };
+      if (url.includes('/token')) return { ok: true, json: async () => ({ access_token: 'access', refresh_token: 'refresh', expires_in: 3600, scope: `${UPLOAD_SCOPE} ${CHANNEL_READ_SCOPE}` }) };
       if (url.includes('/channels?')) return { ok: true, json: async () => ({ items: [{ id: channelId, snippet: { title: '테스트 채널' } }] }) };
       if (options.method === 'POST') return { ok: true, headers: { get: () => 'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=mock' } };
       return { ok: true, json: async () => ({ id: 'abcdefghijk' }) };
     } });
   const auth = new URL(provider.authorizationUrl({ state: 'state', challenge: 'challenge', redirectUri: 'http://127.0.0.1:8765/api/v1/publications/youtube/oauth/callback' }));
-  assert.equal(auth.searchParams.get('scope'), UPLOAD_SCOPE);
+  assert.equal(auth.searchParams.get('scope'), `${UPLOAD_SCOPE} ${CHANNEL_READ_SCOPE}`);
   assert.equal(auth.searchParams.get('code_challenge_method'), 'S256');
   const token = await provider.exchangeCode({ code: 'mock-code', verifier: 'mock-verifier', redirectUri: auth.searchParams.get('redirect_uri') });
   assert.equal(token.refresh_token, 'refresh');
@@ -170,6 +173,45 @@ test('network adapter builds official OAuth and resumable upload requests using 
   assert.equal(JSON.parse(requests[2].options.body).status.privacyStatus, 'private');
   assert.equal(JSON.parse(requests[2].options.body).status.selfDeclaredMadeForKids, false);
   assert.equal(requests[3].options.method, 'PUT');
+});
+
+test('channel lookup distinguishes Google authorization, empty lists, malformed replies and network errors without response text', async () => {
+  const cases = [
+    { status: 401, body: { error: { errors: [{ reason: 'youtubeSignupRequired' }] } }, code: 'YOUTUBE_CHANNEL_SIGNUP_REQUIRED', reason: 'youtubeSignupRequired' },
+    { status: 403, body: { error: { errors: [{ reason: 'insufficientPermissions' }] } }, code: 'YOUTUBE_CHANNEL_PERMISSION_DENIED', reason: 'insufficientPermissions' },
+    { status: 200, body: { items: [] }, code: 'YOUTUBE_CHANNEL_EMPTY', count: 0 },
+    { status: 200, body: { items: [{}] }, code: 'YOUTUBE_CHANNEL_INVALID', count: 1 },
+    { status: 200, body: { unexpected: 'private response text' }, code: 'YOUTUBE_CHANNEL_INVALID' },
+  ];
+  for (const item of cases) {
+    const provider = new YouTubeProvider({ clientId: 'mock', clientSecret: 'mock',
+      fetcher: async () => ({ ok: item.status === 200, status: item.status, json: async () => item.body }) });
+    await assert.rejects(provider.channel({ accessToken: 'mock' }), (error) => {
+      assert.equal(error.code, item.code);
+      assert.equal(error.diagnostic.provider_http_status, item.status);
+      assert.equal(error.diagnostic.provider_reason, item.reason ?? null);
+      assert.equal(error.diagnostic.items_count, item.count ?? null);
+      assert.doesNotMatch(JSON.stringify(error.diagnostic), /private response text|mock/);
+      return true;
+    });
+  }
+  const provider = new YouTubeProvider({ clientId: 'mock', clientSecret: 'mock', fetcher: async () => { throw new Error('private network detail'); } });
+  await assert.rejects(provider.channel({ accessToken: 'mock' }), { code: 'YOUTUBE_CHANNEL_UNAVAILABLE' });
+});
+
+test('OAuth callback preserves safe channel failure category and never saves tokens', async (t) => {
+  const { service, vault } = fixture(t);
+  service.provider.channel = async () => { throw Object.assign(new Error('private response text'), { code: 'YOUTUBE_CHANNEL_EMPTY',
+    diagnostic: { phase: 'youtube_channel_lookup', provider_http_status: 200, provider_reason: null, items_count: 0 } }); };
+  const start = service.begin(owner);
+  await assert.rejects(service.callback(new URL(start.authorization_url).searchParams.get('state'), 'mock-code'), (error) => {
+    assert.equal(error.code, 'YOUTUBE_CHANNEL_EMPTY');
+    assert.deepEqual(error.diagnostic, { phase: 'youtube_channel_lookup', provider_http_status: 200, provider_reason: null, items_count: 0 });
+    assert.doesNotMatch(error.message, /private response text/);
+    return true;
+  });
+  assert.equal(vault.get(owner), null);
+  assert.equal(service.status(owner).connected, false);
 });
 
 test('repository preflight rechecks current approval, verified MP4, hash and owner', (t) => {

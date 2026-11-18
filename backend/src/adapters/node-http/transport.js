@@ -622,11 +622,18 @@ export function createApiHandler({ repositories, auth, webSessions = null, maxMe
     } catch (error) {
       const status = Number.isInteger(error.status) ? error.status : 500;
       const code = error.code || (status === 413 ? 'PAYLOAD_TOO_LARGE' : 'SERVICE_UNAVAILABLE');
-      if (status >= 500) process.stderr.write(`request failed: ${code}\n`);
+      const requestId = cryptoRandomId();
+      if (error.diagnostic?.phase === 'youtube_channel_lookup') {
+        const d = error.diagnostic;
+        process.stderr.write(JSON.stringify({ request_id: requestId, code, phase: 'youtube_channel_lookup',
+          provider_http_status: Number.isInteger(d.provider_http_status) ? d.provider_http_status : null,
+          provider_reason: ['youtubeSignupRequired', 'insufficientPermissions', 'other'].includes(d.provider_reason) ? d.provider_reason : null,
+          items_count: Number.isInteger(d.items_count) && d.items_count >= 0 ? d.items_count : null }) + '\n');
+      } else if (status >= 500) process.stderr.write(`request failed: ${code}\n`);
       const part = /^\/api\/v1\/media\/uploads\/[0-9a-f-]+\/parts\/(\d+)$/.exec(request.url?.split('?')[0] ?? '');
       const itemIndex = Number.isSafeInteger(error.itemIndex) ? error.itemIndex : part ? Number(part[1]) : null;
       const field = typeof error.field === 'string' ? error.field : part ? 'file_bytes' : null;
-      return sendError(response, status, code, itemIndex, field);
+      return sendError(response, status, code, itemIndex, field, requestId);
     }
   };
 }
@@ -706,6 +713,9 @@ const SAFE_MESSAGES = {
   YOUTUBE_NOT_CONFIGURED: 'YouTube 업로드 연결이 아직 설정되지 않았습니다.',
   YOUTUBE_DISCONNECTED: 'YouTube 채널을 먼저 연결해 주세요.',
   YOUTUBE_CHANNEL_UNAVAILABLE: '연결된 YouTube 채널을 확인하지 못했습니다.',
+  YOUTUBE_CHANNEL_SIGNUP_REQUIRED: '이 Google 인증에서 YouTube 채널을 찾지 못했습니다. 사용할 채널 계정으로 다시 연결해 주세요.',
+  YOUTUBE_CHANNEL_PERMISSION_DENIED: 'YouTube 채널 조회 권한이 부족합니다. 연결 권한을 확인해 주세요.',
+  YOUTUBE_CHANNEL_EMPTY: '인증된 계정의 YouTube 채널 목록이 비어 있습니다. 사용할 채널 계정을 확인해 주세요.',
   YOUTUBE_CHANNEL_INVALID: 'YouTube 채널 응답 형식을 확인할 수 없습니다.',
   YOUTUBE_CHANNEL_MISMATCH: '승인된 게시 계정과 연결된 YouTube 채널이 다릅니다.',
   YOUTUBE_UPLOAD_IN_PROGRESS: '이 영상의 YouTube 업로드가 이미 진행 중입니다.',
@@ -758,8 +768,7 @@ function sendJson(response, status, body) {
 
 function sendEmpty(response, status) { response.writeHead(status); response.end(); }
 
-function sendError(response, status, code, itemIndex = null, field = null) {
-  const requestId = cryptoRandomId();
+function sendError(response, status, code, itemIndex = null, field = null, requestId = cryptoRandomId()) {
   const detail = Number.isSafeInteger(itemIndex) && itemIndex >= 1 && itemIndex <= 30 &&
     ['client_item_id', 'file_name', 'size_bytes', 'sha256', 'declared_media_type', 'file_structure', 'file_integrity', 'file_bytes'].includes(field)
     ? { item_index: itemIndex, field } : {};

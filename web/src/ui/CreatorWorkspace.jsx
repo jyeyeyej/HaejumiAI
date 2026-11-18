@@ -215,10 +215,10 @@ export function CreatorWorkspace({ api, project, onChanged, onBack }) {
       <p className="muted">영상 내려받기는 수동 게시 준비용입니다. 플랫폼 권리와 계정 설정을 확인한 뒤 직접 게시해 주세요.</p>
     </section>
     <section className="card workspace-card"><p className="eyebrow">04 · PUBLICATION</p><h2>게시 준비</h2>
-      <p className="muted">플랫폼별 승인은 독립적이며, 현재 MP4와 게시 정보의 버전·해시에 묶입니다. 실제 SNS 게시 호출은 없습니다.</p>
+      <p className="muted">YouTube는 최종 업로드 확인 시 현재 영상과 게시 정보를 승인합니다. TikTok·Instagram은 수동 게시 준비용이며 자동 게시를 지원하지 않습니다.</p>
       {previewCheck?.status !== 'approved' && <p className="muted">영상 미리보기를 승인한 뒤 플랫폼별 정보를 확인할 수 있습니다.</p>}
       {previewCheck?.status === 'approved' && ['youtube', 'tiktok', 'instagram'].map((platform) => <PublicationEditor key={`${taskId}:${platform}:${publications.find((item) => item.platform === platform)?.revision ?? 0}`}
-        api={api} taskId={taskId} task={task} job={job} platform={platform} publication={publications.find((item) => item.platform === platform)}
+        api={api} taskId={taskId} task={task} job={job} platform={platform} publication={publications.find((item) => item.platform === platform)} refresh={refresh} previewUrl={previewUrl}
         suggestion={publicationDraftsFromPlan(plan?.plan, plan?.generation).find((item) => item.platform === platform)}
         previewApproved={previewCheck?.status === 'approved'} busy={busy} run={run} keyFor={keyFor} />)}
     </section>
@@ -311,7 +311,7 @@ function renderFailureMessage(job) {
   return '렌더가 완료되지 않았습니다. 입력 미디어와 FFmpeg 설치 상태를 확인한 뒤 다시 시도해 주세요.';
 }
 
-function PublicationEditor({ api, taskId, task, job, platform, publication, suggestion, previewApproved, busy, run, keyFor }) {
+function PublicationEditor({ api, taskId, task, job, platform, publication, suggestion, previewApproved, busy, run, keyFor, refresh, previewUrl }) {
   const [account, setAccount] = useState(publication?.account_id ?? '');
   const [visibility, setVisibility] = useState(publication?.visibility ?? 'private');
   const [title, setTitle] = useState(publication?.title ?? '');
@@ -322,6 +322,11 @@ function PublicationEditor({ api, taskId, task, job, platform, publication, sugg
   const [youtubeBusy, setYoutubeBusy] = useState(false);
   const [youtubeError, setYoutubeError] = useState('');
   const [youtubeAudience, setYoutubeAudience] = useState('');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmPreview, setConfirmPreview] = useState(null);
+  const [uploadNotice, setUploadNotice] = useState('');
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalNotice, setApprovalNotice] = useState('');
   useEffect(() => {
     if (platform !== 'youtube') return;
     let active = true;
@@ -346,11 +351,96 @@ function PublicationEditor({ api, taskId, task, job, platform, publication, sugg
   const valid = body.account_id.length > 0 && body.account_id.length <= 128 && body.title.length <= 200 && body.description.length <= 5000 && body.hashtags.length <= 30 && body.hashtags.every((tag) => tag.length <= 100) &&
     (platform !== 'youtube' || (body.title.length > 0 && Array.from(body.title).length <= 100 && !/[<>]/.test(body.title + youtubeDescription) && new TextEncoder().encode(youtubeDescription).length <= 5000));
   const label = { youtube: 'YouTube Shorts', tiktok: 'TikTok', instagram: 'Instagram Reels' }[platform];
-  return <details className="publication-card workspace-disclosure"><summary>{label}<small>{publication ? `버전 ${publication.revision} · ${publication.status === 'publish_ready' ? '최종 승인됨' : '승인 대기'}` : '게시 정보 입력 필요'}</small></summary><div className="publication-fields">
+  useEffect(() => () => { if (confirmPreview) URL.revokeObjectURL(confirmPreview); }, [confirmPreview]);
+  const existingUpload = youtubeUploads.find((item) => item.content_version === task.current_version && item.artifact_sha256 === job?.artifact_sha256 &&
+    ['uploading', 'outcome_unknown', 'succeeded'].includes(item.status));
+  const uploadBlock = !youtube?.configured ? '서버 OAuth 설정을 확인해 주세요.' : !youtube.connected ? 'YouTube 계정 연결이 필요합니다.' :
+    !publication || changed ? '게시 정보를 저장해 주세요.' : !previewApproved || !verified(task, job) ? '완성 영상 승인이 필요합니다.' :
+    publication.account_id !== youtube.channel_id ? '게시 계정과 연결된 YouTube 채널이 다릅니다.' : !youtubeAudience ? '아동 대상 여부를 선택해 주세요.' :
+    existingUpload?.status === 'succeeded' ? '이미 업로드한 영상입니다.' : existingUpload ? '기존 업로드 결과를 확인해 주세요. 자동 재업로드하지 않습니다.' : '';
+  const openUploadConfirmation = async () => {
+    if (uploadBlock || youtubeBusy || busy) return;
+    setUploadNotice('');
+    try {
+      if (!previewUrl) setConfirmPreview(await api.preview(taskId, task.current_version, job.artifact_sha256));
+      setConfirmOpen(true);
+    } catch { setUploadNotice('인증된 영상 미리보기를 불러오지 못했습니다. 다시 시도해 주세요.'); }
+  };
+  const confirmUpload = async () => {
+    if (youtubeBusy || !confirmOpen || uploadBlock) return;
+    setYoutubeBusy(true); setUploadNotice('YouTube에 업로드 중...');
+    try {
+      const [currentTask, currentPublications, currentConnection] = await Promise.all([api.task(taskId), api.publications(taskId), api.youtubeConnection()]);
+      const current = currentPublications.items.find((item) => item.publication_id === publication.publication_id);
+      if (!current || current.revision !== publication.revision || current.metadata_hash !== publication.metadata_hash ||
+          currentTask.current_version !== task.current_version || currentTask.content_hash !== task.content_hash ||
+          !currentConnection.connected || currentConnection.channel_id !== publication.account_id)
+        throw new Error('영상·게시 정보·연결 채널이 변경됐습니다. 최신 상태를 확인해 주세요.');
+      if (current.status !== 'publish_ready') await api.approvePublication(taskId, publication.publication_id,
+        { content_version: task.current_version, content_hash: task.content_hash, artifact_sha256: job.artifact_sha256,
+          publication_revision: publication.revision, publication_hash: publication.metadata_hash },
+        keyFor(`publication:approve:${publication.publication_id}:${publication.revision}:${task.current_version}`));
+      const result = await api.youtubeUpload(taskId, publication.publication_id, youtubeAudience === 'yes',
+        keyFor(`youtube:upload:${publication.publication_id}:${publication.revision}:${task.current_version}:${youtubeAudience}`));
+      setYoutubeUploads((await api.youtubeUploads(taskId, publication.publication_id)).items);
+      setUploadNotice(result.status === 'succeeded' ? 'YouTube 업로드가 완료됐습니다.' : '업로드 상태를 확인해 주세요.');
+      setConfirmOpen(false); setConfirmPreview(null); await refresh().catch(() => {});
+    } catch (error) {
+      setUploadNotice(error instanceof ApiError ? error.message : '업로드 결과가 불확실합니다. 서버와 YouTube 채널 상태를 확인한 뒤 다시 시도해 주세요.');
+      await api.youtubeUploads(taskId, publication.publication_id).then((result) => setYoutubeUploads(result.items)).catch(() => {});
+      await refresh().catch(() => {});
+      setConfirmOpen(false); setConfirmPreview(null);
+    } finally { setYoutubeBusy(false); }
+  };
+  const approve = async () => {
+    if (approvalBusy || busy || !publication) return;
+    setApprovalBusy(true); setApprovalNotice('승인 처리 중...');
+    const currentApproval = async () => {
+      const current = (await api.publications(taskId)).items.find((item) => item.publication_id === publication.publication_id);
+      if (!current || current.revision !== publication.revision || current.metadata_hash !== publication.metadata_hash) {
+        await refresh().catch(() => {});
+        throw new Error('게시 정보가 변경됐습니다. 최신 상태를 확인한 뒤 다시 승인해 주세요.');
+      }
+      return current;
+    };
+    try {
+      // Read the server first, including after an uncertain previous request. Never retry automatically.
+      if ((await currentApproval()).status === 'publish_ready') {
+        setApprovalNotice(`이미 최종 승인된 영상입니다 · 게시 정보 버전 ${publication.revision}`);
+        await refresh().catch(() => {});
+        return;
+      }
+      await api.approvePublication(taskId, publication.publication_id, { content_version: task.current_version, content_hash: task.content_hash,
+        artifact_sha256: job.artifact_sha256, publication_revision: publication.revision, publication_hash: publication.metadata_hash },
+      keyFor(`publication:approve:${publication.publication_id}:${publication.revision}:${task.current_version}`));
+      setApprovalNotice(`최종 승인 완료 · 게시 정보 버전 ${publication.revision} · 영상 버전 ${task.current_version}`);
+      await refresh().catch(() => {});
+    } catch (error) {
+      if (error.message === '게시 정보가 변경됐습니다. 최신 상태를 확인한 뒤 다시 승인해 주세요.') {
+        setApprovalNotice(error.message);
+      } else if (!(error instanceof ApiError)) {
+        try {
+          if ((await currentApproval()).status === 'publish_ready') {
+            setApprovalNotice(`최종 승인 완료 · 게시 정보 버전 ${publication.revision} · 영상 버전 ${task.current_version}`);
+            await refresh().catch(() => {});
+            return;
+          }
+        } catch { /* A failed status check must not cause an automatic approval retry. */ }
+        setApprovalNotice('승인 결과를 확인하지 못했습니다. 서버 상태를 새로고침한 뒤 다시 확인해 주세요.');
+      } else {
+        if (error.status === 409) await refresh().catch(() => {});
+        setApprovalNotice(error.code === 'RENDER_REQUIRED' ? '현재 영상의 렌더와 미리보기 승인을 먼저 확인해 주세요.' :
+          error.code === 'RIGHTS_REVIEW_REQUIRED' ? '음악 또는 원본 오디오의 게시 권리를 먼저 확인해 주세요.' :
+          error.code === 'INVALID_STATE_TRANSITION' ? '현재 게시 정보는 승인할 수 없는 상태입니다. 영상과 게시 정보를 다시 확인해 주세요.' :
+          error.code === 'VERSION_CONFLICT' ? '영상 또는 게시 정보가 변경됐습니다. 최신 상태를 불러와 다시 확인해 주세요.' : error.message);
+      }
+    } finally { setApprovalBusy(false); }
+  };
+  return <details className="publication-card workspace-disclosure"><summary>{label}<small>{publication ? `게시 정보 버전 ${publication.revision} · ${changed ? '미저장 변경' : publication.status === 'publish_ready' ? '게시 준비됨' : '저장됨'}` : '게시 정보 입력 필요'}</small></summary><div className="publication-fields">
     {suggestion?.title ? <><button className="secondary" disabled={busy} onClick={() => { setTitle(suggestion.title); setDescription(suggestion.description); setTags(suggestion.hashtags.join(', ')); }}>분석 기반 게시 문구 초안 가져오기</button><p className="muted">장면 분석의 분류·피사체를 바탕으로 만든 초안입니다. 실제 내용과 권리를 확인하고 수정해 주세요.</p></>
       : <p className="warning">확인된 시각 분석 정보가 없어 게시 문구를 자동 작성하지 않았습니다. 제목·설명·해시태그를 직접 입력해 주세요.</p>}
     {platform === 'youtube' && <div className="publication-connection">
-      <p><strong>YouTube 채널</strong> · {!youtube ? '확인 중' : youtube.connected ? `${youtube.channel_title} (${youtube.channel_id})` : youtube.configured ? '연결되지 않음' : '서버 OAuth 설정 필요'}</p>
+      <p><strong>YouTube 채널</strong> · {!youtube ? '확인 중' : youtube.connected ? `${youtube.channel_title} (${youtube.channel_id})` : youtube.configured ? '연결되지 않음' : '서버 OAuth 설정 또는 백엔드 재시작 필요'}</p>
       {youtube?.configured && <div className="button-row">{youtube.connected ? <>
         <button className="secondary" disabled={youtubeBusy || busy} onClick={() => setAccount(youtube.channel_id)}>이 채널을 게시 계정으로 사용</button>
         <button className="secondary" disabled={youtubeBusy || busy} onClick={() => youtubeAction(() => api.youtubeDisconnect())}>채널 연결 해제</button>
@@ -371,19 +461,33 @@ function PublicationEditor({ api, taskId, task, job, platform, publication, sugg
     <div className="button-row"><button disabled={busy || !valid || (publication && !changed)} onClick={() => run(() => publication
       ? api.updatePublication(taskId, publication.publication_id, { ...body, revision: publication.revision }, keyFor(`publication:update:${publication.publication_id}:${publication.revision}:${JSON.stringify(body)}`))
       : api.createPublication(taskId, body, keyFor(`publication:create:${taskId}:${platform}:${JSON.stringify(body)}`)), '게시 정보를 저장했습니다. 변경 전 승인은 무효화됩니다.')}>게시 정보 저장</button>
-      {publication && <button className="secondary" disabled={busy || !valid || changed || !previewApproved || !verified(task, job) || publication.status === 'publish_ready'}
-        onClick={() => run(() => api.approvePublication(taskId, publication.publication_id, { content_version: task.current_version, content_hash: task.content_hash,
-          artifact_sha256: job.artifact_sha256, publication_revision: publication.revision, publication_hash: publication.metadata_hash },
-        keyFor(`publication:approve:${publication.publication_id}:${publication.revision}:${task.current_version}`)), '현재 영상과 이 플랫폼 게시 정보를 최종 승인했습니다. 실제 게시는 실행되지 않았습니다.')}>이 플랫폼 최종 승인</button>}</div>
+      {platform !== 'youtube' && publication && <button className="secondary" disabled={busy || approvalBusy || !valid || changed || !previewApproved || !verified(task, job) || publication.status === 'publish_ready'}
+        onClick={approve}>{approvalBusy ? '승인 처리 중...' : '이 플랫폼 최종 승인'}</button>}</div>
+    {platform !== 'youtube' && publication?.status === 'publish_ready' && !changed && <p className="notice" role="status">이미 최종 승인된 영상입니다 · 게시 정보 버전 {publication.revision} · 영상 버전 {task.current_version}</p>}
+    {platform !== 'youtube' && approvalNotice && <p className="notice" role="status">{approvalNotice}</p>}
     {platform === 'youtube' && <div className="publication-upload">
-      <p className="muted">YouTube 전송은 최종 승인 후 아래 버튼을 직접 눌러야 시작됩니다. 비공개로 시험하려면 게시 정보의 공개범위를 비공개로 저장하고 다시 승인해 주세요.</p>
+      <p className="muted">완성 MP4 {previewApproved ? '미리보기 승인됨' : '미리보기 승인 필요'} · 영상 버전 {task.current_version} · 게시 정보 버전 {publication?.revision ?? '미저장'}. 업로드 최종 확인 전에는 YouTube로 전송되지 않습니다.</p>
       <label>아동 대상 여부 <select value={youtubeAudience} onChange={(event) => setYoutubeAudience(event.target.value)}>
         <option value="">선택해 주세요</option><option value="no">아동용 아님</option><option value="yes">아동용</option>
       </select></label>
-      <button disabled={busy || youtubeBusy || !youtube?.connected || !publication || publication.status !== 'publish_ready' || changed || !previewApproved || !verified(task, job) || account.trim() !== youtube?.channel_id || !youtubeAudience}
-        onClick={() => youtubeAction(() => api.youtubeUpload(taskId, publication.publication_id, youtubeAudience === 'yes'))}>승인된 MP4를 YouTube에 업로드</button>
-      {youtubeUploads.map((item) => <p key={item.upload_id}>{item.status === 'succeeded' ? <a href={item.url} target="_blank" rel="noopener noreferrer">업로드 완료 · YouTube 영상 보기</a> :
+      <button disabled={busy || youtubeBusy || Boolean(uploadBlock)} onClick={openUploadConfirmation}>{youtubeBusy ? 'YouTube에 업로드 중...' : 'YouTube에 업로드'}</button>
+      {uploadBlock && <p className="muted" role="status">{uploadBlock}</p>}
+      {uploadNotice && <p className="notice" role="status">{uploadNotice}</p>}
+      {youtubeUploads.map((item) => <p key={item.upload_id}>{item.status === 'succeeded' ? <a href={item.url} target="_blank" rel="noopener noreferrer">업로드 완료 · 영상 ID {item.video_id} · YouTube에서 보기</a> :
         item.status === 'outcome_unknown' ? '업로드 결과 불확실 · YouTube 채널에서 확인 필요' : '업로드 진행 중'}</p>)}
+      {confirmOpen && <div className="youtube-confirm-backdrop"><div className="youtube-confirm" role="dialog" aria-modal="true" aria-label="YouTube 업로드 최종 확인">
+        <h3>YouTube 업로드 최종 확인</h3>
+        <p>연결 채널: {youtube.channel_title} ({youtube.channel_id})</p>
+        {(previewUrl || confirmPreview) && <video src={previewUrl || confirmPreview} preload="metadata" controls muted playsInline aria-label="업로드할 영상 미리보기" />}
+        <p>영상 버전 {task.current_version} · 게시 정보 버전 {publication.revision}</p>
+        <p>제목: {publication.title}</p><p>설명: {publication.description}</p>
+        <p>해시태그: {publication.hashtags.map((tag) => `#${tag}`).join(' ') || '없음'}</p>
+        <p>공개범위: {{ private: '비공개', unlisted: '일부 공개', public: '전체 공개' }[publication.visibility]}</p>
+        <p>아동 대상: {youtubeAudience === 'yes' ? '예' : '아니요'}</p>
+        <p className="muted">확인을 누르면 현재 YouTube 영상과 게시 정보에 대한 최종 승인 후 업로드를 시작합니다.</p>
+        <div className="button-row"><button className="secondary" disabled={youtubeBusy} onClick={() => { setConfirmOpen(false); setConfirmPreview(null); }}>취소</button>
+          <button disabled={youtubeBusy} onClick={confirmUpload}>{youtubeBusy ? 'YouTube에 업로드 중...' : '이 영상 YouTube에 업로드하기'}</button></div>
+      </div></div>}
     </div>}
   </div></details>;
 }

@@ -1,4 +1,5 @@
 const UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload';
+const CHANNEL_READ_SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
 
 /** Network adapter. Constructed only when YouTube publishing is explicitly enabled. */
 export class YouTubeProvider {
@@ -11,7 +12,7 @@ export class YouTubeProvider {
   authorizationUrl({ state, challenge, redirectUri }) {
     const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     for (const [key, value] of Object.entries({ client_id: this.clientId, redirect_uri: redirectUri,
-      response_type: 'code', scope: UPLOAD_SCOPE, access_type: 'offline', prompt: 'consent',
+      response_type: 'code', scope: `${UPLOAD_SCOPE} ${CHANNEL_READ_SCOPE}`, access_type: 'offline', prompt: 'consent',
       state, code_challenge: challenge, code_challenge_method: 'S256' })) url.searchParams.set(key, value);
     return url.toString();
   }
@@ -39,12 +40,23 @@ export class YouTubeProvider {
     if (!response.ok) throw new Error('GOOGLE_REVOKE_ERROR');
   }
   async channel({ accessToken }) {
-    const response = await this.fetcher('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
-      headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(20_000) });
-    if (!response.ok) throw new Error('YOUTUBE_CHANNEL_ERROR');
-    const result = await response.json();
-    if (!Array.isArray(result.items) || result.items.length !== 1 ||
-        typeof result.items[0].id !== 'string' || typeof result.items[0].snippet?.title !== 'string') throw new Error('YOUTUBE_CHANNEL_INVALID');
+    let response;
+    try { response = await this.fetcher('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
+      headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(20_000) }); }
+    catch { throw channelError('YOUTUBE_CHANNEL_UNAVAILABLE'); }
+    let result;
+    try { result = await response.json(); } catch { throw channelError('YOUTUBE_CHANNEL_INVALID', response.status); }
+    if (!response.ok) {
+      const reason = result?.error?.errors?.[0]?.reason;
+      const safeReason = ['youtubeSignupRequired', 'insufficientPermissions'].includes(reason) ? reason : 'other';
+      const code = response.status === 401 && safeReason === 'youtubeSignupRequired' ? 'YOUTUBE_CHANNEL_SIGNUP_REQUIRED' :
+        response.status === 403 && safeReason === 'insufficientPermissions' ? 'YOUTUBE_CHANNEL_PERMISSION_DENIED' : 'YOUTUBE_CHANNEL_UNAVAILABLE';
+      throw channelError(code, response.status, safeReason);
+    }
+    if (!Array.isArray(result?.items)) throw channelError('YOUTUBE_CHANNEL_INVALID', response.status);
+    if (result.items.length === 0) throw channelError('YOUTUBE_CHANNEL_EMPTY', response.status, null, 0);
+    if (result.items.length !== 1 || typeof result.items[0].id !== 'string' ||
+        typeof result.items[0].snippet?.title !== 'string') throw channelError('YOUTUBE_CHANNEL_INVALID', response.status, null, result.items.length);
     return { channel_id: result.items[0].id, channel_title: result.items[0].snippet.title };
   }
   async upload({ accessToken, bytes, title, description, hashtags, visibility, madeForKids }) {
@@ -68,4 +80,10 @@ export class YouTubeProvider {
   }
 }
 
-export { UPLOAD_SCOPE };
+export { UPLOAD_SCOPE, CHANNEL_READ_SCOPE };
+
+function channelError(code, httpStatus = null, reason = null, itemsCount = null) {
+  return Object.assign(new Error(code), { code, diagnostic: { phase: 'youtube_channel_lookup',
+    provider_http_status: Number.isInteger(httpStatus) ? httpStatus : null,
+    provider_reason: reason, items_count: Number.isInteger(itemsCount) ? itemsCount : null } });
+}

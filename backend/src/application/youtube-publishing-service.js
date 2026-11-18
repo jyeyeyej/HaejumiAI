@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { UPLOAD_SCOPE } from './youtube-provider.js';
+import { UPLOAD_SCOPE, CHANNEL_READ_SCOPE } from './youtube-provider.js';
 
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
 const safeUpload = (row) => ({ upload_id: row.upload_id, task_id: row.task_id, publication_id: row.publication_id,
@@ -50,10 +50,16 @@ export class YouTubePublishingService {
     catch { fail(503, 'OAUTH_EXCHANGE_FAILED'); }
     if (typeof credential?.access_token !== 'string' || typeof credential?.refresh_token !== 'string' ||
         !Number.isFinite(credential.expires_at) || credential.expires_at <= Date.now() ||
-        !Array.isArray(credential.scopes) || !credential.scopes.includes(UPLOAD_SCOPE)) fail(403, 'OAUTH_SCOPE_MISSING');
+        !Array.isArray(credential.scopes) || !credential.scopes.includes(UPLOAD_SCOPE) ||
+        !credential.scopes.includes(CHANNEL_READ_SCOPE)) fail(403, 'OAUTH_SCOPE_MISSING');
     let channel;
     try { channel = await this.provider.channel({ accessToken: credential.access_token }); }
-    catch { fail(503, 'YOUTUBE_CHANNEL_UNAVAILABLE'); }
+    catch (error) {
+      const code = ['YOUTUBE_CHANNEL_SIGNUP_REQUIRED', 'YOUTUBE_CHANNEL_PERMISSION_DENIED', 'YOUTUBE_CHANNEL_EMPTY', 'YOUTUBE_CHANNEL_INVALID'].includes(error?.code)
+        ? error.code : 'YOUTUBE_CHANNEL_UNAVAILABLE';
+      throw Object.assign(new Error(code), { code, status: code === 'YOUTUBE_CHANNEL_INVALID' ? 502 : 503,
+        diagnostic: error?.diagnostic ?? { phase: 'youtube_channel_lookup', provider_http_status: null, provider_reason: null, items_count: null } });
+    }
     if (!validChannel(channel)) fail(502, 'YOUTUBE_CHANNEL_INVALID');
     this.vault.set(pending.owner, credential);
     this.state.data.youtubePublishing.connections[pending.owner] = { status: 'connected',
